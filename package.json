@@ -1,6 +1,6 @@
 {
   "name": "xats-setup",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "One-command, OS-agnostic installer for the xats cross-agent bus (daemon + service + Claude Code hooks + opencode/mimocode plugins + bridge). Windows, macOS, Linux.",
   "type": "module",
   "bin": {
