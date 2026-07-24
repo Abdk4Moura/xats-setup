@@ -51,7 +51,7 @@ jobs:
           npm version "$version" --no-git-tag-version --allow-same-version
           # Trusted Publishing: npm authenticates via the OIDC id-token. Requires
           # the Trusted Publisher set on npmjs.com for `xats-setup`.
-          out=$(npm publish --access public 2>&1) && { echo "$out"; exit 0; }
+          out=$(npm publish --access public --provenance 2>&1) && { echo "$out"; exit 0; }
           echo "$out"
           if echo "$out" | grep -qiE "cannot publish over|previously published|403 .*cannot publish over"; then
             echo "::notice::xats-setup@$version already on npm — nothing to do"; exit 0
