@@ -1,0 +1,59 @@
+# Publish xats-setup to npm via OIDC Trusted Publishing (no long-lived token).
+#
+# Trigger: push a `v<semver>` tag (e.g. v0.1.2), or run manually with a tag.
+# The tag drives the published version; the committed package.json version is
+# informational (the workflow sets it from the tag before publishing).
+#
+# Auth: npm Trusted Publishing. Requires a Trusted Publisher configured once on
+# npmjs.com for the `xats-setup` package, pointing at:
+#   repository: Abdk4Moura/xats-setup
+#   workflow:   .github/workflows/publish.yml
+# Provenance is generated automatically from the OIDC id-token.
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.2)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC for npm Trusted Publishing (no NPM_TOKEN)
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Use an npm that supports Trusted Publishing (OIDC)
+        run: npm install -g npm@latest
+      - name: npm publish (Trusted Publishing)
+        run: |
+          set -euo pipefail
+          echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$' \
+            || { echo "::error::unexpected tag format: '$TAG' (want vX.Y.Z)"; exit 1; }
+          version="${TAG#v}"
+          npm version "$version" --no-git-tag-version --allow-same-version
+          # Trusted Publishing: npm authenticates via the OIDC id-token. Requires
+          # the Trusted Publisher set on npmjs.com for `xats-setup`.
+          out=$(npm publish --access public 2>&1) && { echo "$out"; exit 0; }
+          echo "$out"
+          if echo "$out" | grep -qiE "cannot publish over|previously published|403 .*cannot publish over"; then
+            echo "::notice::xats-setup@$version already on npm — nothing to do"; exit 0
+          fi
+          echo "::error::npm publish failed. Is the Trusted Publisher configured on npmjs.com (package xats-setup, repo Abdk4Moura/xats-setup, workflow publish.yml)?"; exit 1

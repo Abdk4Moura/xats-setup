@@ -1,0 +1,20 @@
+{
+  "name": "xats-setup",
+  "version": "0.1.2",
+  "description": "One-command, OS-agnostic installer for the xats cross-agent bus (daemon + service + Claude Code hooks + opencode/mimocode plugins + bridge). Windows, macOS, Linux.",
+  "type": "module",
+  "bin": {
+    "xats-setup": "./install.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "install.mjs",
+    "lib/",
+    "assets/",
+    "README.md"
+  ],
+  "keywords": ["xats", "cross-agent-teams", "installer", "cross-platform"],
+  "license": "MIT"
+}
