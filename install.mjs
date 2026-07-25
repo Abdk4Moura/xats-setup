@@ -18,9 +18,13 @@ import { installService } from './lib/service.mjs';
 import { installClaude } from './lib/claude.mjs';
 import { installHarnesses } from './lib/harness.mjs';
 import { installBridge } from './lib/bridge.mjs';
+import { restartDaemon } from './lib/service.mjs';
+import { describeRun, writeManifest } from './lib/manifest.mjs';
 import { BASE_URL } from './lib/constants.mjs';
 import { ensureDir } from './lib/log.mjs';
+import { readFileSync } from 'node:fs';
 
+const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 const ALL = ['daemon', 'service', 'claude', 'harness', 'bridge'];
 
 function parseArgs(argv) {
@@ -73,9 +77,12 @@ async function main() {
   setDry(opts.dry);
   if (opts.label) process.env.XATS_LABEL = opts.label;
 
-  console.log(`\n  xats-setup — full-peer install ${isDry() ? '(DRY RUN)' : ''}`);
+  console.log(`\n  xats-setup v${VERSION} — full-peer install ${isDry() ? '(DRY RUN)' : ''}`);
   const paths = getPaths();
   ensureDir(paths.xatsRoot);
+
+  // Detect a prior install so we can update it in place (idempotent + migrate).
+  const { prior, mode } = describeRun(paths, VERSION);
 
   const pre = preflight();
 
@@ -85,6 +92,12 @@ async function main() {
   else { const { daemonLayout } = await import('./lib/daemon.mjs'); lay = daemonLayout(paths); }
 
   if (opts.components.has('service')) installService(lay);
+  // On an UPGRADE where the daemon build actually changed, the old daemon is
+  // still running the old code — restart it so the update takes effect. (Fresh
+  // installs already started the new build in the service step.)
+  if (opts.components.has('daemon') && lay && lay.updated && mode !== 'fresh')
+    restartDaemon(paths, lay.entry);
+
   if (opts.components.has('claude')) installClaude(paths);
   if (opts.components.has('harness')) installHarnesses(paths);
   if (opts.components.has('bridge')) installBridge(paths);
@@ -98,9 +111,21 @@ async function main() {
     else log.warn(`daemon not answering on ${BASE_URL}/health yet — check the service, then: curl ${BASE_URL}/health`);
   }
 
+  // Record what we installed so a future run can detect + update this box.
+  if (!isDry()) {
+    writeManifest(paths, {
+      version: VERSION,
+      updatedAt: new Date().toISOString(),
+      platform: process.platform,
+      components: [...opts.components],
+      daemonEntry: lay ? lay.entry : null,
+    });
+  }
+
   const s = summary();
   log.step('Done');
-  console.log(`  Box: ${s.host} (${s.platform}/${s.arch}, node ${s.node})`);
+  console.log(`  Box:    ${s.host} (${s.platform}/${s.arch}, node ${s.node})`);
+  console.log(`  Mode:   ${mode}${prior ? ` (was v${prior.version})` : ''} -> v${VERSION}`);
   console.log(`  Daemon: ${lay ? lay.entry : 'n/a'}`);
   console.log(`  Bus:    ${BASE_URL}`);
   console.log(`  Next:   restart Claude Code / opencode so they register on the bus.`);

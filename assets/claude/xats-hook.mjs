@@ -92,13 +92,12 @@ async function start() {
   fs.writeFileSync(idFileFor(id.tag), agentId);
 
   // Detached heartbeat: a separate node process that outlives this short hook
-  // invocation and bumps last_seen_at every 30s until the CC process exits.
+  // invocation and keeps the agent alive until the CC process exits. Agents that
+  // stop heartbeating are reaped within ~a minute, so this is what keeps an
+  // interactive Claude session present on the bus.
   const ppid = process.ppid;
-  const child = spawn(process.execPath, [fileURLToPathSelf(), 'heartbeat', agentId, String(ppid)], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
+  const args = [fileURLToPathSelf(), 'heartbeat', String(ppid), id.name, process.env.CLAUDE_JOB_DIR || ''];
+  const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
 }
 
@@ -115,13 +114,21 @@ async function end() {
 }
 
 async function heartbeat() {
-  const agentId = process.argv[3];
-  const ppid = parseInt(process.argv[4], 10);
-  if (!agentId || !ppid) process.exit(1);
+  const ppid = parseInt(process.argv[3], 10);
+  const name = process.argv[4];
+  const jobDir = process.argv[5] || '';
+  if (!ppid || !name) process.exit(1);
+  const interval = parseInt(process.env.XATS_HEARTBEAT_MS || '', 10) || 30000;
+  const body = { name, team: TEAM, agent_type: 'claude-code', device: host };
+  if (jobDir) body.delivery = { kind: 'claude-job', job_id: path.basename(jobDir), job_dir: jobDir };
   const alive = () => { try { process.kill(ppid, 0); return true; } catch { return false; } };
-  while (alive()) {
-    await post('/api/heartbeat', { agent_id: agentId });
-    await new Promise((r) => setTimeout(r, 30000));
+  const jobGone = () => jobDir && !fs.existsSync(jobDir);
+  while (alive() && !jobGone()) {
+    // Heartbeat by RE-REGISTERING (not /api/heartbeat): keeps last_seen fresh AND
+    // self-heals — if the daemon already reaped this agent, re-register recreates
+    // it, whereas a heartbeat on a reaped id would just fail and stay gone.
+    await post('/api/register', body);
+    await new Promise((r) => setTimeout(r, interval));
   }
   process.exit(0);
 }

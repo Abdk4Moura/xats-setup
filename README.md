@@ -36,6 +36,24 @@ npx xats-setup --force         # reinstall the daemon base package
 After install, restart Claude Code / opencode so they register on the bus.
 Health check: `curl http://127.0.0.1:9100/health`.
 
+## Updating
+
+Re-run the same command — it's an in-place update:
+
+```sh
+npx xats-setup@latest
+```
+
+It records what it installed in `~/.xats/manifest.json`, so a re-run **detects a
+prior version and migrates it**: overwrites the daemon build, hook, and plugins
+with the current ones, and — if the daemon build actually changed — restarts the
+daemon so the update takes effect. Same-version re-runs are a no-op refresh.
+
+Agents that stop heartbeating are reaped within ~a minute, so the Claude hook
+keeps an interactive session alive by **re-registering every 30s** (a plain
+heartbeat on a reaped id would fail; re-register self-heals). Restart your Claude
+session after an update so it picks up the new hook.
+
 ## Bringing the bridge onto the mesh
 
 ```sh
