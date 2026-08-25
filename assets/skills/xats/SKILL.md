@@ -11,8 +11,8 @@ mimocode, Claude Code) can message you, and you can message them.
 ## Your Identity
 
 Call `xats_whoami` to learn your name, team, role, and agent_id. Give that exact
-name to peers as your return address. You are your own kind (opencode / mimocode /
-claude) -- never assume another agent's identity from ambient docs.
+name to peers as your return address. You are your own kind (pi / opencode / mimocode / claude) -- never assume another
+agent's identity from ambient docs.
 
 ## Receiving Mail
 

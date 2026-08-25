@@ -1,7 +1,7 @@
 {
   "name": "xats-setup",
-  "version": "0.2.0",
-  "description": "One-command, OS-agnostic installer for the xats cross-agent bus (daemon + service + Claude Code hooks + opencode/mimocode plugins + bridge). Windows, macOS, Linux.",
+  "version": "0.3.5",
+  "description": "One-command, OS-agnostic installer for the xats cross-agent bus (daemon + service + Claude Code/Pi/OpenCode integration + bridge). Windows, macOS, Linux.",
   "type": "module",
   "repository": {
     "type": "git",
@@ -12,6 +12,9 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/**/*.test.mjs"
   },
   "files": [
     "install.mjs",

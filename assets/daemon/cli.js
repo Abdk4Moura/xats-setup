@@ -468,7 +468,6 @@ var AgentsRepo = class {
     this.db = db;
     this.list = this.list.bind(this);
   }
-  db;
   findByIdentity(args) {
     return this.db.prepare(
       `SELECT agent_id FROM agents WHERE device=? AND team=? AND name=?`
@@ -745,7 +744,6 @@ var EventsOutbox = class {
   constructor(db) {
     this.db = db;
   }
-  db;
   append(args) {
     const stmt = this.db.prepare(
       `INSERT INTO events (from_team, to_team, event_type, actor_agent_id, payload, created_at)
@@ -841,7 +839,7 @@ var RegisterAgentService = class {
       if ("error" in validTeam) return validTeam;
     }
     const resolvedDevice = resolveEffectiveDevice({
-      requestedDevice: input.device ?? void 0,
+      requestedDevice: input.device,
       originInfo: this.deps.getSessionOrigin?.(input.connection_id),
       localDevice: this.deps.localDevice ?? "local"
     });
@@ -1198,7 +1196,6 @@ var GetDeliveryStatusService = class {
   constructor(db) {
     this.db = db;
   }
-  db;
   get(args) {
     const owned = this.db.prepare(
       `SELECT 1 AS ok FROM messages WHERE id=? AND from_agent_id=? LIMIT 1`
@@ -1269,10 +1266,6 @@ var SendMessageService = class {
     this.events = events;
     this.deps = deps;
   }
-  db;
-  agents;
-  events;
-  deps;
   async send(input) {
     const hasId = typeof input.to_agent_id === "string" && input.to_agent_id.length > 0;
     const hasName = typeof input.to_agent_name === "string" && input.to_agent_name.length > 0;
@@ -1405,9 +1398,6 @@ var BroadcastService = class {
     this.agents = agents;
     this.deps = deps;
   }
-  db;
-  agents;
-  deps;
   async broadcast(input) {
     const fromRow = this.agents.findById(input.from);
     if (!fromRow) return { error: "unknown_recipient" };
@@ -1517,10 +1507,6 @@ var BroadcastToRoleService = class {
     this.events = events;
     this.deps = deps;
   }
-  db;
-  agents;
-  events;
-  deps;
   async broadcast(input) {
     const fromRow = this.agents.findById(input.from);
     if (!fromRow) return { error: "unknown_recipient" };
@@ -1630,8 +1616,6 @@ var GetInboxService = class {
     this.db = db;
     this.agents = agents;
   }
-  db;
-  agents;
   get(args) {
     const caller = this.agents.findById(args.caller);
     if (!caller) return { messages: [], has_more: false, last_event_id: args.since_event_id ?? 0 };
@@ -1813,7 +1797,6 @@ var JsonRpcSocketClient = class {
       this.rejectAll(closeDetail(event));
     });
   }
-  ws;
   nextId = 1;
   pending = /* @__PURE__ */ new Map();
   openState;
@@ -2248,8 +2231,6 @@ var SubscribeChannelWakeService = class {
     this.db = db;
     this.fanout = fanout;
   }
-  db;
-  fanout;
   subscribe(input) {
     const csid = input.channel_session_id?.trim();
     if (!csid) return { error: "invalid_channel_session_id" };
@@ -2267,7 +2248,6 @@ var BindChannelService = class {
     this.fanout = fanout;
     this.repo = new AgentsRepo(db);
   }
-  fanout;
   repo;
   bind(input) {
     const csid = input.channel_session_id?.trim();
@@ -2292,8 +2272,6 @@ var AutoBindChannelService = class {
     this.db = db;
     this.fanout = fanout;
   }
-  db;
-  fanout;
   lookup(input) {
     return this.findLiveProxyCsid(input);
   }
@@ -2558,8 +2536,6 @@ var RegisterCodexSelfService = class {
     this.registerSvc = registerSvc;
     this.deps = deps;
   }
-  registerSvc;
-  deps;
   async register(input) {
     const env = this.deps.env ?? process.env;
     const wsUrl = resolveWsUrl(input, env);
@@ -2738,8 +2714,6 @@ var RegisterOpencodeSelfService = class {
     this.registerSvc = registerSvc;
     this.deps = deps;
   }
-  registerSvc;
-  deps;
   async register(input) {
     const fetchImpl = this.deps.fetch ?? globalThis.fetch;
     const baseUrl = normalizeBaseUrl(input.base_url);
@@ -2850,8 +2824,6 @@ var UnregisterSelfService = class {
     this.db = db;
     this.agents = agents;
   }
-  db;
-  agents;
   unregister(args) {
     const caller = this.agents.findById(args.caller);
     if (!caller) return { error: "unknown_agent" };
@@ -3118,7 +3090,6 @@ var CodexPanePreRegRepo = class {
   constructor(db) {
     this.db = db;
   }
-  db;
   upsert(input) {
     this.db.prepare(
       `INSERT INTO codex_pane_pre_registrations (pane_id, xats_agent_id, expires_at)
@@ -3172,8 +3143,6 @@ var PreRegisterCodexPaneService = class {
     this.repo = repo;
     this.now = now;
   }
-  repo;
-  now;
   register(args) {
     const parsed = preRegisterCodexPaneInputSchema.safeParse(args);
     if (!parsed.success) {
@@ -3533,7 +3502,7 @@ function registerBusinessTools(server, db, getCallerAgentId, fanout, onRegisterS
   const registerAgentInputSchema = z3.object({
     model: z3.string().optional(),
     name: z3.string().min(1).refine((v) => v.trim().length > 0, { message: "name must not be empty" }),
-    device: z3.string().nullish(),
+    device: z3.string().optional(),
     role: z3.string().optional(),
     team: z3.string().optional(),
     project_dir: z3.string().min(1).optional(),
@@ -3693,7 +3662,7 @@ function registerBusinessTools(server, db, getCallerAgentId, fanout, onRegisterS
     }
     if (args.agent_type === "claude-code" && args.channel_session_id !== void 0 && args.ui_pid !== void 0 && autoBindChannelSvc) {
       const effectiveDevice = resolveEffectiveDevice({
-        requestedDevice: args.device ?? void 0,
+        requestedDevice: args.device,
         originInfo: getSessionOriginInfo?.(),
         localDevice: context?.localDevice ?? "local"
       });
@@ -4606,7 +4575,7 @@ var registerBodySchema = z4.object({
   name: z4.string().min(1),
   team: z4.string().optional(),
   role: z4.string().optional(),
-  device: z4.string().nullish(),
+  device: z4.string().optional(),
   agent_type: z4.string().optional(),
   agent_type_name: z4.string().optional(),
   model: z4.string().optional(),
@@ -4642,7 +4611,7 @@ async function handleRegister(ctx, req, reply) {
     if ("error" in validTeam) return reply.code(400).send({ error: validTeam.error });
   }
   const deviceResult = resolveEffectiveDevice({
-    requestedDevice: data.device ?? void 0,
+    requestedDevice: data.device,
     localDevice: ctx.localDevice
   });
   if ("error" in deviceResult) return reply.code(400).send({ error: deviceResult.error });
@@ -4717,6 +4686,53 @@ async function handleWhoami(ctx, req, reply) {
     last_seen_at: row.last_seen_at
   });
 }
+async function handleEvents(ctx, req, reply) {
+  const query = req.query;
+  const team = typeof query.team === "string" ? query.team : void 0;
+  const name = typeof query.name === "string" ? query.name : void 0;
+  if (!team || !name) {
+    return reply.code(400).send({ error: "invalid_request", detail: "team and name are required" });
+  }
+  const owner = ctx.agents.findByIdentity({ device: ctx.localDevice, team, name });
+  if (!owner) return reply.code(404).send({ error: "unknown_owner" });
+  const agentId = owner.agent_id;
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "Access-Control-Allow-Origin": "*"
+  });
+  reply.raw.write("retry: 3000\n\n");
+  reply.raw.write("data: " + JSON.stringify({ type: "hello", team, name }) + "\n\n");
+  let last = 0;
+  try {
+    const row = ctx.db.prepare("SELECT COALESCE(MAX(event_id),0) as m FROM messages WHERE to_agent_id = ?").get(agentId);
+    last = row?.m ?? 0;
+  } catch {
+  }
+  const interval = setInterval(() => {
+    try {
+      const rows = ctx.db.prepare("SELECT event_id FROM messages WHERE to_agent_id = ? AND event_id > ? ORDER BY event_id ASC LIMIT 10").all(agentId, last);
+      if (rows.length) {
+        last = rows[rows.length - 1].event_id;
+        reply.raw.write("data: " + JSON.stringify({ type: "inbox", count: rows.length, last_event_id: last }) + "\n\n");
+      } else {
+        reply.raw.write(": keepalive\n\n");
+      }
+    } catch {
+    }
+  }, 1e3);
+  const cleanup = () => {
+    try {
+      clearInterval(interval);
+    } catch {
+    }
+  };
+  req.raw.on("close", cleanup);
+  reply.raw.on("close", cleanup);
+  await new Promise(() => {
+  });
+}
 function mountRestApi(app, db, deps = {}) {
   const agents = new AgentsRepo(db);
   const events = new EventsOutbox(db);
@@ -4733,6 +4749,7 @@ function mountRestApi(app, db, deps = {}) {
   app.post("/api/deregister", (req, reply) => handleDeregister(ctx, req, reply));
   app.post("/api/heartbeat", (req, reply) => handleHeartbeat(ctx, req, reply));
   app.post("/api/whoami", (req, reply) => handleWhoami(ctx, req, reply));
+  app.get("/api/events", (req, reply) => handleEvents(ctx, req, reply));
 }
 
 // src/daemon/cleanup.ts
