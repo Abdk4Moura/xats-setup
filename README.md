@@ -20,6 +20,7 @@ sudo** (everything lands under `~/.xats`). The only prerequisite is **Node ≥ 2
 | `service` | Runs the daemon at login/boot: **systemd** (Linux, `--user` + linger, or system unit as root), **launchd** (macOS LaunchAgent), **Scheduled Task** (Windows, ONLOGON). Also starts it immediately. |
 | `claude`  | Claude Code hook + `cross-agent-teams` MCP entry + xats skill (pure-Node, no bash/jq/curl). |
 | `pi`      | Pi extension (`~/.pi/agent/extensions/xats.ts`) + xats skill. Polls inbox and injects an `<xats-inbox>` user message that starts/queues a turn. |
+| `omp`     | OMP extension (`~/.omp/agent/extensions/xats.ts`) + xats skill — same `xats.ts` (type-only import erased) as Pi, independent agent. |
 | `opencode`| `xats-register` + `notify-unified` plugins + xats skill for opencode. |
 | `mimocode`| Same plugins + skill for mimocode. |
 | `harness` | Deprecated alias for `opencode,mimocode,pi` (kept for compat). |
@@ -33,6 +34,7 @@ npx xats-setup --yes           # non-interactive full peer (CI / scripts)
 npx xats-setup --dry-run       # preview every action, change nothing
 npx xats-setup --only=daemon,service,pi   # just Pi on this box (no prompt)
 npx xats-setup --only=pi       # only Pi's extension+skill (needs a running daemon elsewhere)
+npx xats-setup --only=omp      # only OMP's extension+skill
 npx xats-setup --without claude,pi  # generic verb — exclude any list (aliases: --except/--exclude/--skip/--omit)
 npx xats-setup --without=bridge       # same as --no-bridge, no endless --no-* flags
 npx xats-setup --no-claude            # single-component shorthand still works
@@ -42,7 +44,7 @@ npx xats-setup reset           # remove everything xats-setup installed
 npx xats-setup reset --only=pi # remove only Pi's bits
 ```
 
-Each agent (`claude`, `pi`, `opencode`, `mimocode`) is optional. Default is **all** — users normally want cross-agent talk — but pick any subset with `--only=` or `--without`/`--except`.
+Each agent (`claude`, `pi`, `omp`, `opencode`, `mimocode`) is optional. Default is **all** — users normally want cross-agent talk — but pick any subset with `--only=` or `--without`/`--except`. `omp` is independent of `pi` (same `xats.ts` works for both, installed to `~/.pi` vs `~/.omp`).
 
 **Ephemeral loader + log:** in a TTY the installer shows a single-line loader (`⠋ current step — log /tmp/xats-setup-…log`) that disappears on finish; all detail goes to `$(os.tmpdir())/xats-setup-*.log`. Final summary is clean and prints `Log: /tmp/… — cat for verbose output`. Use `--verbose`/`--no-ephemeral` to stream live logs instead.
 
@@ -113,7 +115,7 @@ Node, so install-node == run-node by construction.
 Until it's on npm, install from the packed tarball (works the same on every OS):
 
 ```sh
-npm i -g ./xats-setup-0.3.5.tgz && xats-setup
+npm i -g ./xats-setup-0.3.6.tgz && xats-setup
 # or, no global install:
-npx ./xats-setup-0.3.5.tgz
+npx ./xats-setup-0.3.6.tgz
 ```

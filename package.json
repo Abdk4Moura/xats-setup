@@ -1,6 +1,6 @@
 {
   "name": "xats-setup",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "One-command, OS-agnostic installer for the xats cross-agent bus (daemon + service + Claude Code/Pi/OpenCode integration + bridge). Windows, macOS, Linux.",
   "type": "module",
   "repository": {

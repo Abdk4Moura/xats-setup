@@ -18,6 +18,7 @@ import { installService } from './lib/service.mjs';
 import { installClaude } from './lib/claude.mjs';
 import { installOpencode, installMimocode, installHarnesses } from './lib/harness.mjs';
 import { installPi, ensurePiLabel } from './lib/pi.mjs';
+import { installOmp } from './lib/omp.mjs';
 import { installBridge } from './lib/bridge.mjs';
 import { restartDaemon } from './lib/service.mjs';
 import { describeRun, writeManifest } from './lib/manifest.mjs';
@@ -29,7 +30,7 @@ import * as readline from 'node:readline';
 import path from 'node:path';
 
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
-const AGENTS = ['claude', 'pi', 'opencode', 'mimocode'];
+const AGENTS = ['claude', 'pi', 'omp', 'opencode', 'mimocode'];
 const INFRA = ['daemon', 'service', 'bridge'];
 const ALL = [...INFRA.slice(0, 2), ...AGENTS, ...INFRA.slice(2)]; // daemon,service,claude,pi,opencode,mimocode,bridge
 const HARNESS_ALIAS = new Set(['opencode', 'mimocode', 'pi']); // back-compat: harness = opencode+mimocode+pi until removed
@@ -291,7 +292,11 @@ async function main() {
         if (opts.components.has('opencode')) log.warn('Windows opencode plugin will be wired but WSL opencode needs its own setup: run  wsl -- npx xats-setup --only=opencode,pi,daemon,service  inside WSL');
         else log.info('Tip: to wire WSL opencode, run  wsl -- npx xats-setup --only=opencode  inside WSL');
       }
-      if (w.daemon || w.pi) log.info(`WSL has${w.daemon ? ' daemon' : ''}${w.daemon && w.pi ? ' +' : ''}${w.pi ? ' Pi' : ''} — these are separate from Windows until bridged.`);
+      if (w.omp) {
+        if (opts.components.has('omp')) log.info('WSL has omp (~/.omp/agent found) — will be wired (same xats.ts)');
+        else log.info('WSL has omp (~/.omp/agent found) — run --only=omp or --without pi to wire');
+      }
+      if (w.daemon || w.pi || w.omp) log.info(`WSL has${w.daemon ? ' daemon' : ''}${w.daemon && (w.pi||w.omp) ? ' +' : ''}${w.pi ? ' Pi' : ''}${w.pi && w.omp ? ' +' : ''}${w.omp ? ' omp' : ''} — these are separate from Windows until bridged.`);
       if (!w.filament && opts.components.has('bridge')) log.warn('WSL filament not found — Windows↔WSL bridge will need filament on both sides (cargo install filament).');
       if (w.opencode || w.daemon) log.info('Bridge Windows↔WSL: add the WSL peer to C:\\Users\\...\\.xats\\bridge\\peers.json and the Windows peer to ~/.xats/bridge/peers.json, then `bridge up` on both (needs filament).');
     }
@@ -315,6 +320,7 @@ async function main() {
 
   if (opts.components.has('claude')) { setStepStatus('claude','running','wiring'); installClaude(paths); setStepStatus('claude','done','done'); } else setStepStatus('claude','skip','skipped');
   if (opts.components.has('pi')) { setStepStatus('pi','running','wiring'); installPi(paths); setStepStatus('pi','done','done'); } else setStepStatus('pi','skip','skipped');
+  if (opts.components.has('omp')) { setStepStatus('omp','running','wiring'); installOmp(paths); setStepStatus('omp','done','done'); } else setStepStatus('omp','skip','skipped');
   if (opts.components.has('opencode')) { setStepStatus('opencode','running','wiring'); installOpencode(paths); setStepStatus('opencode','done','done'); } else setStepStatus('opencode','skip','skipped');
   if (opts.components.has('mimocode')) { setStepStatus('mimocode','running','wiring'); installMimocode(paths); setStepStatus('mimocode','done','done'); } else setStepStatus('mimocode','skip','skipped');
   if (opts.components.has('harness')) { installHarnesses(paths); }
