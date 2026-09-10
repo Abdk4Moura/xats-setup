@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 
 function resolveBaseUrl(): string {
   if (process.env.XATS_BASE_URL) return process.env.XATS_BASE_URL;
@@ -27,7 +27,19 @@ function resolveLabel(): string | undefined {
   return undefined;
 }
 const label = resolveLabel();
-const name = label ? `pi-${os.hostname()}-${label}` : `pi-${os.hostname()}-${randomUUID().slice(0, 8)}`;
+// The label is a box-level PREFIX only. Uniqueness comes from the session
+// suffix below: two Pi sessions on one box must never share one identity.
+const baseName = `pi-${os.hostname()}${label ? `-${label}` : ""}`;
+const NAMES_FILE = path.join(os.homedir(), ".xats", "names.json");
+const BINDING_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const BINDING_CAP = 200;
+
+type NameMode = "prefer" | "exact";
+type Binding = { name: string; at: number };
+
+let name = baseName;
+let nameMode: NameMode = "prefer";
+let sessionKey: string | null = null;
 let agentId: string | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let inboxTimer: ReturnType<typeof setInterval> | undefined;
@@ -41,16 +53,76 @@ async function request(path: string, init?: RequestInit) {
     signal: AbortSignal.timeout(5_000),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`${response.status}: ${JSON.stringify(data)}`);
+  if (!response.ok) {
+    const error: any = new Error(`${response.status}: ${JSON.stringify(data)}`);
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
   return data as any;
+}
+
+function readBindings(): Record<string, Binding> {
+  try {
+    const all = JSON.parse(fs.readFileSync(NAMES_FILE, "utf8"));
+    const sessions = all?.sessions;
+    return sessions && typeof sessions === "object" ? sessions : {};
+  } catch { return {}; }
+}
+function readBinding(key: string): string | undefined {
+  const hit = readBindings()[key];
+  return hit && typeof hit.name === "string" && hit.name ? hit.name : undefined;
+}
+function writeBinding(key: string, value: string): void {
+  try {
+    const sessions = readBindings();
+    sessions[key] = { name: value, at: Date.now() };
+    const now = Date.now();
+    let entries = Object.entries(sessions).filter(([, v]) => now - (v?.at ?? 0) < BINDING_RETENTION_MS);
+    if (entries.length > BINDING_CAP) {
+      entries = entries.sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0)).slice(0, BINDING_CAP);
+    }
+    fs.mkdirSync(path.dirname(NAMES_FILE), { recursive: true });
+    fs.writeFileSync(NAMES_FILE, JSON.stringify({ version: 1, sessions: Object.fromEntries(entries) }, null, 2));
+  } catch { /* best-effort: identity still works without a binding */ }
+}
+function sessionShort(sid: string): string | undefined {
+  const cleaned = sid.trim();
+  // Pi session ids are time-prefixed (ULID-like): three sessions started in the
+  // same bucket share their LEADING characters, so slicing the head would hand
+  // them the same suffix. Hash the whole id for a uniformly spread, stable one.
+  return cleaned ? createHash("sha256").update(cleaned).digest("hex").slice(0, 8) : undefined;
+}
+// Precedence: XATS_NAME (exact) > session binding (exact) > base-session (prefer).
+function resolveIdentity(ctx: any): void {
+  const sid = String(ctx?.sessionManager?.getSessionId?.() ?? "").trim();
+  sessionKey = sid || null;
+  const explicit = process.env.XATS_NAME?.trim();
+  if (explicit) { name = explicit; nameMode = "exact"; return; }
+  const bound = sid ? readBinding(sid) : undefined;
+  if (bound) { name = bound; nameMode = "exact"; return; }
+  const short = (sid && sessionShort(sid)) || randomUUID().slice(0, 8);
+  name = `${baseName}-${short}`;
+  nameMode = "prefer";
 }
 
 async function register() {
   const data = await request("/api/register", {
     method: "POST",
-    body: JSON.stringify({ name, team, role, agent_type: "custom", agent_type_name: "pi" }),
+    body: JSON.stringify({
+      name,
+      team,
+      role,
+      agent_type: "custom",
+      agent_type_name: "pi",
+      session_key: sessionKey ?? undefined,
+      name_mode: nameMode,
+    }),
   });
   agentId = data.agent_id;
+  // In prefer mode the daemon may disambiguate (name-2). Adopt whatever it
+  // assigned so peers and this session agree on the return address.
+  if (typeof data.name === "string" && data.name) name = data.name;
   return agentId;
 }
 
@@ -99,7 +171,7 @@ export default function (pi: ExtensionAPI) {
       es = new ES(url);
       es.onmessage = () => { void pollInbox(); };
       es.onerror = () => {
-        try { es?.close(); } catch {}
+        try { es?.close(); } catch { /* ignore: closing a dead stream */ }
         es = null;
         startPoll();
       };
@@ -109,6 +181,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    resolveIdentity(ctx);
     const id = await keepAlive();
     // Continue trying even if startup races the daemon service. It also
     // self-heals after daemon restarts and TTL reaping.
@@ -123,7 +196,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (inboxTimer) clearInterval(inboxTimer);
-    if (es) { try { es.close(); } catch {} es = null; }
+    if (es) { try { es.close(); } catch { /* ignore: closing a dead stream */ } es = null; }
     heartbeatTimer = undefined;
     inboxTimer = undefined;
     const id = agentId;
@@ -135,6 +208,48 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "xats_whoami", label: "Xats Who Am I", description: "Show this Pi agent's xats identity and return address.", parameters: Type.Object({}),
     async execute() { return { content: [{ type: "text", text: `You are \"${name}\" on xats (team ${team}, role ${role}, agent_id ${agentId ?? "unregistered"}).` }], details: {} }; },
+  });
+  pi.registerTool({
+    name: "xats_claim_name",
+    label: "Xats Claim Name",
+    description: "Assume a specific xats name (e.g. a director assigns 'lend-gpu-worker'). Refuses if a live agent already holds it on your team. The name binds to this session, so it survives resume but not a brand-new session; set XATS_NAME to pin one across restarts.",
+    parameters: Type.Object({ name: Type.String({ description: "The name to assume, e.g. 'lend-gpu-worker'" }) }),
+    async execute(_id, args) {
+      const desired = String((args as any).name ?? "").trim();
+      if (!desired) return { content: [{ type: "text", text: "name required" }], details: {}, isError: true };
+      const previousId = agentId;
+      try {
+        const data = await request("/api/register", {
+          method: "POST",
+          body: JSON.stringify({
+            name: desired,
+            team,
+            role,
+            agent_type: "custom",
+            agent_type_name: "pi",
+            session_key: sessionKey ?? undefined,
+            name_mode: "exact",
+          }),
+        });
+        name = typeof data.name === "string" && data.name ? data.name : desired;
+        nameMode = "exact";
+        agentId = data.agent_id;
+        if (sessionKey) writeBinding(sessionKey, name);
+        if (previousId && previousId !== agentId) {
+          await request("/api/deregister", { method: "POST", body: JSON.stringify({ agent_id: previousId }) }).catch(() => undefined);
+        }
+        // The open SSE stream (and its inbox filter) was opened under the old
+        // name; reconnect it so delivery follows the new return address.
+        if (es) { try { es.close(); } catch { /* ignore */ } es = null; }
+        startSse();
+        return { content: [{ type: "text", text: `Now registered as \"${name}\" (team ${team}, role ${role}, agent_id ${agentId}). Give peers \"${name}\" as your return address.` }], details: {} };
+      } catch (error: any) {
+        if (error?.status === 409) {
+          return { content: [{ type: "text", text: `\"${desired}\" is already taken by a live agent on team ${team}. Pick another name, or set XATS_NAME to pin it.` }], details: {}, isError: true };
+        }
+        return { content: [{ type: "text", text: `claim error: ${error}` }], details: {}, isError: true };
+      }
+    },
   });
   pi.registerTool({
     name: "xats_agents", label: "Xats Agents", description: "List online xats agents on a team.",

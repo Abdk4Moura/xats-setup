@@ -1,0 +1,4 @@
+{
+  "ignore": ["assets/daemon/**"],
+  "format": { "enabled": false }
+}

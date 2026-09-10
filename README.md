@@ -38,7 +38,7 @@ npx xats-setup --only=omp      # only OMP's extension+skill
 npx xats-setup --without claude,pi  # generic verb — exclude any list (aliases: --except/--exclude/--skip/--omit)
 npx xats-setup --without=bridge       # same as --no-bridge, no endless --no-* flags
 npx xats-setup --no-claude            # single-component shorthand still works
-npx xats-setup --label umar    # identity label for this box's agents
+npx xats-setup --label umar    # prefix for this box's agent identities
 npx xats-setup --force         # reinstall the daemon base package
 npx xats-setup reset           # remove everything xats-setup installed
 npx xats-setup reset --only=pi # remove only Pi's bits
@@ -50,7 +50,11 @@ Each agent (`claude`, `pi`, `omp`, `opencode`, `mimocode`) is optional. Default 
 
 **Interactive:** `npx xats-setup` with no flags in a TTY opens a picker: `Enter`=all, `c`=toggle each `Y/n` (shows `found/not found`), `n`=none, `q`=quit. Use `--yes`/`--only`/`--without` to skip (CI, scripts, re-runs). The picker is skipped when `CI=1` or stdin is piped.
 
-After install, restart Claude Code / Pi (`/reload` in Pi) / opencode so they register on the bus. Pi stores its stable label in `~/.xats/label` (and `setx XATS_LABEL` on Windows) so `pi-<host>-<label>` is stable across restarts; override with `--label <name>` or `XATS_LABEL` env.
+After install, restart Claude Code / Pi (`/reload` in Pi) / opencode so they register on the bus.
+
+**Identity is per session, not per box.** Each agent registers as `<kind>-<host>-<label>-<session8>`, where `label` (`~/.xats/label`, `XATS_LABEL`, or `--label`) is only a human-readable prefix and `session8` is derived from the harness session id. Two Pi (or opencode, or Claude) sessions on one machine therefore hold two distinct identities and two separate inboxes instead of overwriting each other.
+
+To pin an exact name that survives every restart, set `XATS_NAME` (e.g. `XATS_NAME=lend-gpu-worker`). An agent can also claim a name at runtime with `xats_claim_name`; that binding is scoped to the session, so it returns on resume but a brand-new session starts from the computed default. The daemon is the authority: it disambiguates a colliding preferred name with a `-2` suffix and refuses an exact claim that a live agent already holds.
 Health check: `curl http://127.0.0.1:$(cat ~/.xats/port 2>/dev/null || echo 9100)/health` — setup also runs an ephemeral bus probe (`register → list → deregister`) and verifies each selected component’s files.
 
 ## Windows ↔ WSL

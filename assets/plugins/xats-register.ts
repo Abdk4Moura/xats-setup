@@ -10,15 +10,29 @@
  *   2. Fallback: MIMOCODE env -> "mimocode", OPENCODE env -> "opencode"
  *   3. Fail-loud: "unknown-<host>-<label>" (never silent collision)
  *
- * Name format: <kind>-<hostname>-<label|random>
+ * Name format: <kind>-<hostname>-<label?>-<session8>
  * agent_type_name: <kind>
  */
 
 import * as os from "node:os"
-import { randomUUID } from "node:crypto"
+import fs from "node:fs"
+import path from "node:path"
+import { randomUUID, createHash } from "node:crypto"
 import { tool, type Plugin } from "@opencode-ai/plugin"
 
-const XATS_BASE = "http://127.0.0.1:9100"
+// Resolve the daemon the same way the Pi adapter does: an explicit env
+// override, else the port the daemon actually persisted, else 9100. Hardcoding
+// 9100 silently breaks every call when the daemon is serving on another port.
+function resolveBase(): string {
+  if (process.env.XATS_BASE_URL) return process.env.XATS_BASE_URL
+  try {
+    const p = fs.readFileSync(path.join(os.homedir(), ".xats", "port"), "utf8").trim()
+    const n = parseInt(p, 10)
+    if (Number.isInteger(n) && n > 0 && n < 65536) return `http://127.0.0.1:${n}`
+  } catch { /* no port file */ }
+  return "http://127.0.0.1:9100"
+}
+const XATS_BASE = resolveBase()
 const XATS_DB = `${os.homedir()}/.cross-agent-teams-mcp/data.db`
 const HEARTBEAT_INTERVAL_MS = 30_000
 const RECEIVE_POLL_MS = 3_000
@@ -44,8 +58,15 @@ const XatsRegisterPlugin: Plugin = async (input) => {
   const team = process.env.XATS_TEAM ?? "default"
   const label = process.env.XATS_LABEL
   const role = process.env.XATS_ROLE ?? "worker"
-  // Name format: <kind>-<hostname>-<label|random>
-  let name = label ? `${kind}-${hostname}-${label}` : `${kind}-${hostname}-${randomUUID().slice(0, 8)}`
+  // The label is a box-level PREFIX only; uniqueness comes from the session
+  // suffix below, so two opencode sessions on one box never share an identity.
+  const baseName = `${kind}-${hostname}${label ? `-${label}` : ""}`
+  const NAMES_FILE = `${os.homedir()}/.xats/names.json`
+  const BINDING_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+  const BINDING_CAP = 200
+  let name = baseName
+  let nameMode: "prefer" | "exact" = "prefer"
+  let sessionKey: string | null = null
 
   let registeredAgentId: string | null = null
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
@@ -54,16 +75,90 @@ const XatsRegisterPlugin: Plugin = async (input) => {
   let lastEventId = 0
   let db: any = null
 
+  function readBindings(): Record<string, { name: string; at: number }> {
+    try {
+      const all = JSON.parse(fs.readFileSync(NAMES_FILE, "utf8"))
+      const sessions = all?.sessions
+      return sessions && typeof sessions === "object" ? sessions : {}
+    } catch { return {} }
+  }
+  function readBinding(key: string): string | undefined {
+    const hit = readBindings()[key]
+    return hit && typeof hit.name === "string" && hit.name ? hit.name : undefined
+  }
+  function writeBinding(key: string, value: string): void {
+    try {
+      const sessions = readBindings()
+      sessions[key] = { name: value, at: Date.now() }
+      const now = Date.now()
+      let entries = Object.entries(sessions).filter(([, v]) => now - ((v as any)?.at ?? 0) < BINDING_RETENTION_MS)
+      if (entries.length > BINDING_CAP) {
+        entries = entries.sort((a, b) => ((b[1] as any)?.at ?? 0) - ((a[1] as any)?.at ?? 0)).slice(0, BINDING_CAP)
+      }
+      fs.mkdirSync(path.dirname(NAMES_FILE), { recursive: true })
+      fs.writeFileSync(NAMES_FILE, JSON.stringify({ version: 1, sessions: Object.fromEntries(entries) }, null, 2))
+    } catch { /* best-effort: identity still works without a binding */ }
+  }
+  function sessionShort(sid: string): string | undefined {
+    const cleaned = sid.trim()
+    // Session ids can be time-prefixed (ULID-like), where the LEADING characters
+    // collide across sessions in the same bucket. Hash the whole id instead.
+    return cleaned ? createHash("sha256").update(cleaned).digest("hex").slice(0, 8) : undefined
+  }
+  // Precedence: XATS_NAME (exact) > session binding (exact) > base-session (prefer).
+  function resolveIdentity(sid: string | null): void {
+    sessionKey = sid
+    const explicit = process.env.XATS_NAME?.trim()
+    if (explicit) { name = explicit; nameMode = "exact"; return }
+    const bound = sid ? readBinding(sid) : undefined
+    if (bound) { name = bound; nameMode = "exact"; return }
+    name = `${baseName}-${(sid && sessionShort(sid)) || randomUUID().slice(0, 8)}`
+    nameMode = "prefer"
+  }
+
   async function register(): Promise<string | null> {
     try {
       const res = await fetch(`${XATS_BASE}/api/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, team, role, agent_type: "custom", agent_type_name: kind }),
+        body: JSON.stringify({
+          name,
+          team,
+          role,
+          agent_type: "custom",
+          agent_type_name: kind,
+          session_key: sessionKey ?? undefined,
+          name_mode: nameMode,
+        }),
       })
-      if (res.ok) return (await res.json()).agent_id
+      if (res.ok) {
+        const data: any = await res.json()
+        // In prefer mode the daemon may disambiguate (name-2); adopt whatever
+        // it assigned so peers and this session agree on the return address.
+        if (typeof data?.name === "string" && data.name) name = data.name
+        return data.agent_id
+      }
     } catch { /* daemon not running */ }
     return null
+  }
+
+  // Rebind to the identity derived from a newly known session id. The previous
+  // row is deregistered so a placeholder never lingers as a ghost agent.
+  async function applySession(sid: string): Promise<void> {
+    const previous = registeredAgentId
+    resolveIdentity(sid)
+    const next = await register()
+    if (!next) return
+    registeredAgentId = next
+    if (previous && previous !== next) {
+      try {
+        await fetch(`${XATS_BASE}/api/deregister`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent_id: previous }),
+        })
+      } catch { /* ignore: the reaper collects it */ }
+    }
   }
 
   async function heartbeat(aid: string): Promise<void> {
@@ -121,6 +216,7 @@ const XatsRegisterPlugin: Plugin = async (input) => {
     } catch { /* ignore */ }
   }
 
+  resolveIdentity(await resolveSession())
   registeredAgentId = await register()
 
   if (registeredAgentId) {
@@ -197,7 +293,11 @@ const XatsRegisterPlugin: Plugin = async (input) => {
       const e = event as { type: string; properties: Record<string, unknown> }
       if (e.type === "session.status" || e.type === "session.idle") {
         const sid = e.properties?.sessionID
-        if (typeof sid === "string") activeSessionID = sid
+        if (typeof sid === "string") {
+          activeSessionID = sid
+          // First time we learn the session: move off any placeholder identity.
+          if (sid !== sessionKey) void applySession(sid)
+        }
       }
     },
     tool: {
@@ -278,30 +378,43 @@ const XatsRegisterPlugin: Plugin = async (input) => {
         execute: async (a) => {
           const desired = a.name.trim()
           if (!desired) return "name required"
-          try {
-            const res = await fetch(`${XATS_BASE}/api/agents?team=${encodeURIComponent(team)}`)
-            const data = await res.json().catch(() => ({}))
-            const agents = Array.isArray(data) ? data : (data as any).agents ?? []
-            const clash = agents.find((x: any) => x.name === desired && x.agent_id !== registeredAgentId && x.online)
-            if (clash) return `"${desired}" is already taken by a live agent on team ${team}. Pick another name.`
-          } catch { /* best-effort */ }
           const prev = registeredAgentId
           try {
             const res = await fetch(`${XATS_BASE}/api/register`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name: desired, team, role, agent_type: "custom", agent_type_name: kind }),
+              body: JSON.stringify({
+                name: desired,
+                team,
+                role,
+                agent_type: "custom",
+                agent_type_name: kind,
+                session_key: sessionKey ?? undefined,
+                name_mode: "exact",
+              }),
             })
-            if (!res.ok) return `claim failed (${res.status})`
-            const newId = (await res.json()).agent_id
-            if (prev && prev !== newId) {
-              try { await fetch(`${XATS_BASE}/api/deregister`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent_id: prev }) }) } catch { /* ignore */ }
+            if (res.status === 409) {
+              return `"${desired}" is already taken by a live agent on team ${team}. Pick another name, or set XATS_NAME to pin it.`
             }
-            name = desired
+            if (!res.ok) return `claim failed (${res.status})`
+            const data: any = await res.json().catch(() => ({}))
+            const newId = data?.agent_id
+            name = typeof data?.name === "string" && data.name ? data.name : desired
+            nameMode = "exact"
             registeredAgentId = newId
+            if (sessionKey) writeBinding(sessionKey, name)
+            if (prev && prev !== newId) {
+              try {
+                await fetch(`${XATS_BASE}/api/deregister`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ agent_id: prev }),
+                })
+              } catch { /* ignore */ }
+            }
             lastEventId = 0
             if (db) { try { lastEventId = (db.query("SELECT COALESCE(MAX(event_id),0) m FROM messages WHERE to_agent_id = ?").get(newId) as any)?.m ?? 0 } catch { /* ignore */ } }
-            return `Now registered as "${desired}" (team ${team}, role ${role}, agent_id ${newId}). Give peers "${desired}" as your return address.`
+            return `Now registered as "${name}" (team ${team}, role ${role}, agent_id ${newId}). Give peers "${name}" as your return address.`
           } catch (e) { return `claim error: ${String(e)}` }
         },
       }),

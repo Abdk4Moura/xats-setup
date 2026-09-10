@@ -45,6 +45,7 @@ var DDL = [
     team TEXT NOT NULL,
     role TEXT NOT NULL,
     name TEXT NOT NULL,
+    session_key TEXT,
     model TEXT,
     registered_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
@@ -121,7 +122,8 @@ function migrateAgentsDeliveryColumns(db) {
   const needRuntimeVerificationMode = !existing.has("runtime_verification_mode");
   const needRuntimeBoundAt = !existing.has("runtime_bound_at");
   const needClaudeUiPid = !existing.has("claude_ui_pid");
-  if (!needAgentType && !needAgentTypeName && !needKind && !needPayload && !needRuntimeUiPid && !needRuntimeTty && !needRuntimeVerificationMode && !needRuntimeBoundAt && !needClaudeUiPid) return;
+  const needSessionKey = !existing.has("session_key");
+  if (!needAgentType && !needAgentTypeName && !needKind && !needPayload && !needRuntimeUiPid && !needRuntimeTty && !needRuntimeVerificationMode && !needRuntimeBoundAt && !needClaudeUiPid && !needSessionKey) return;
   const tx = db.transaction(() => {
     if (needAgentType) {
       db.exec(`ALTER TABLE agents ADD COLUMN agent_type TEXT`);
@@ -149,6 +151,9 @@ function migrateAgentsDeliveryColumns(db) {
     }
     if (needClaudeUiPid) {
       db.exec(`ALTER TABLE agents ADD COLUMN claude_ui_pid INTEGER`);
+    }
+    if (needSessionKey) {
+      db.exec(`ALTER TABLE agents ADD COLUMN session_key TEXT`);
     }
     if (needKind || needPayload) {
       db.exec(`UPDATE agents
@@ -488,12 +493,52 @@ var AgentsRepo = class {
     const team = input.team ?? "default";
     const device = input.device ?? "local";
     const role = input.role ?? "default";
-    const name = input.name;
+    const requestedName = input.name;
+    const sessionKey = input.session_key ?? null;
+    const mode = input.name_mode === "exact" ? "exact" : "prefer";
+    const ttlMs = input.ttl_ms ?? REACHABLE_MS_DEFAULT;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const newId = randomUUID();
     const delivery = input.delivery ?? { kind: "none" };
     const serialized = serializeDelivery(delivery);
     const preserveExistingDelivery = input.delivery === void 0 ? 1 : 0;
+    const findRow = (candidate) => this.db.prepare(
+      `SELECT agent_id, session_key, last_seen_at FROM agents WHERE device=? AND team=? AND name=?`
+    ).get(device, team, candidate);
+    // Identity is the (device, team, name) unique index, so a colliding name is
+    // the same agent. Distinguish only when the caller tells us its session:
+    // no session_key keeps the legacy takeover semantics (MCP register_agent).
+    let name = requestedName;
+    let existing = findRow(requestedName);
+    // Prefer mode with a known session: if this session already owns an
+    // identity, keep it even when its name differs from the computed default
+    // (e.g. after a claim). This lets a claimed name survive a resume without a
+    // client-side binding file.
+    if (mode === "prefer" && sessionKey !== null) {
+      const owned = this.db.prepare(
+        `SELECT name FROM agents WHERE device=? AND team=? AND session_key=?`
+      ).get(device, team, sessionKey);
+      if (owned && owned.name !== requestedName) {
+        name = owned.name;
+        existing = findRow(name);
+      }
+    }
+    if (existing) {
+      const sameSession = sessionKey !== null && existing.session_key === sessionKey;
+      const live = isAgentLive({ last_seen_at: existing.last_seen_at }, { ttlMs });
+      // A caller with no session_key and prefer mode is a legacy/MCP register:
+      // keep its takeover semantics. An explicit exact request always guards
+      // the name, even without a session_key.
+      const wantsDistinct = sessionKey !== null || mode === "exact";
+      if (wantsDistinct && !sameSession && live) {
+        if (mode === "exact") {
+          const conflict = new Error("name_taken");
+          conflict.code = "name_taken";
+          throw conflict;
+        }
+        name = this.allocateName(device, team, requestedName, sessionKey, ttlMs, findRow);
+      }
+    }
     const tx = this.db.transaction(() => {
       this.writeAgentRow({
         newId,
@@ -502,6 +547,7 @@ var AgentsRepo = class {
         device,
         role,
         name,
+        sessionKey,
         now,
         serialized,
         preserveExistingDelivery
@@ -517,25 +563,34 @@ var AgentsRepo = class {
       }
     });
     tx();
-    const row = this.db.prepare(
-      `SELECT agent_id FROM agents WHERE device=? AND team=? AND name=?`
-    ).get(device, team, name);
-    return { agent_id: row.agent_id, team };
+    const row = findRow(name);
+    return { agent_id: row.agent_id, team, name };
+  }
+  allocateName(device, team, base, sessionKey, ttlMs, findRow) {
+    for (let i = 2; i <= 50; i++) {
+      const candidate = `${base}-${i}`;
+      const row = findRow(candidate);
+      if (!row) return candidate;
+      const sameSession = sessionKey !== null && row.session_key === sessionKey;
+      if (sameSession || !isAgentLive({ last_seen_at: row.last_seen_at }, { ttlMs })) return candidate;
+    }
+    return `${base}-${randomUUID().slice(0, 8)}`;
   }
   writeAgentRow(args) {
-    const { newId, input, team, device, role, name, now, serialized, preserveExistingDelivery } = args;
+    const { newId, input, team, device, role, name, sessionKey, now, serialized, preserveExistingDelivery } = args;
     this.db.prepare(
       `INSERT INTO agents (
-         agent_id, agent_type, agent_type_name, device, team, role, name, model, registered_at, last_seen_at,
+         agent_id, agent_type, agent_type_name, device, team, role, name, session_key, model, registered_at, last_seen_at,
          tmux_pane_id, claude_ui_pid, runtime_ui_pid, delivery_kind, delivery_payload, remote_addr,
          last_processed_event_id
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                COALESCE((SELECT MAX(event_id) FROM events), 0))
        ON CONFLICT (device, team, name) DO UPDATE SET
          agent_type = excluded.agent_type,
          agent_type_name = excluded.agent_type_name,
          role = excluded.role,
+         session_key = excluded.session_key,
          model = excluded.model,
          last_seen_at = excluded.last_seen_at,
          tmux_pane_id = COALESCE(excluded.tmux_pane_id, tmux_pane_id),
@@ -558,6 +613,7 @@ var AgentsRepo = class {
       team,
       role,
       name,
+      sessionKey ?? null,
       input.model ?? null,
       now,
       now,
@@ -3063,7 +3119,7 @@ async function detectTmuxPane(input, deps = {}) {
   let candidates;
   try {
     candidates = collectCandidates(panes, ttyMap, input);
-  } catch (error) {
+  } catch {
     return {
       error: "not_found",
       candidates: []
@@ -4573,6 +4629,8 @@ async function handleAgents(ctx, req, reply) {
 }
 var registerBodySchema = z4.object({
   name: z4.string().min(1),
+  name_mode: z4.enum(["prefer", "exact"]).optional(),
+  session_key: z4.string().min(1).optional(),
   team: z4.string().optional(),
   role: z4.string().optional(),
   device: z4.string().optional(),
@@ -4623,6 +4681,8 @@ async function handleRegister(ctx, req, reply) {
   }
   const input = {
     name: data.name,
+    name_mode: data.name_mode,
+    session_key: data.session_key,
     team: data.team,
     role: data.role,
     device: deviceResult.ok,
@@ -4631,7 +4691,15 @@ async function handleRegister(ctx, req, reply) {
     model: data.model,
     delivery
   };
-  const result = ctx.agents.register(input);
+  let result;
+  try {
+    result = ctx.agents.register(input);
+  } catch (err) {
+    if (err && err.code === "name_taken") {
+      return reply.code(409).send({ error: "name_taken", name: data.name, detail: "a live agent on this team already holds that name" });
+    }
+    throw err;
+  }
   return reply.send(result);
 }
 async function handleDeregister(ctx, req, reply) {
@@ -5277,7 +5345,13 @@ async function runPreRegisterCodexPane() {
   }
   const token = tokenExplicit ?? process.env.CROSS_AGENT_TEAMS_MCP_TOKEN;
   const host = process.env.CROSS_AGENT_TEAMS_MCP_HOST ?? "127.0.0.1";
-  const base = new URL(`http://${host}:${port}/mcp`);
+  let base;
+  try {
+    base = new URL(`http://${host}:${port}/mcp`);
+  } catch {
+    console.error('{"ok":false,"error":"invalid_daemon_url","detail":"CROSS_AGENT_TEAMS_MCP_HOST/PORT did not form a valid URL"}');
+    process.exit(1);
+  }
   const requestInit = token ? { headers: { Authorization: `Bearer ${token}` } } : void 0;
   const transport = new StreamableHTTPClientTransport(base, {
     requestInit

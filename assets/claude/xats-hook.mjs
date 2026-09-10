@@ -23,8 +23,20 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { randomUUID, createHash } from 'node:crypto';
 
-const BASE = process.env.XATS_BASE || 'http://127.0.0.1:9100';
+// Resolve the daemon the same way the Pi adapter does: an explicit env
+// override, else the port the daemon actually persisted, else 9100.
+function resolveBase() {
+  if (process.env.XATS_BASE) return process.env.XATS_BASE;
+  try {
+    const p = fs.readFileSync(path.join(os.homedir(), '.xats', 'port'), 'utf8').trim();
+    const n = parseInt(p, 10);
+    if (Number.isInteger(n) && n > 0 && n < 65536) return `http://127.0.0.1:${n}`;
+  } catch { /* no port file */ }
+  return 'http://127.0.0.1:9100';
+}
+const BASE = resolveBase();
 const TEAM = process.env.XATS_TEAM || 'default';
 const MODE = process.argv[2];
 
@@ -62,6 +74,15 @@ function readStdin() {
   });
 }
 
+// A malformed hook payload must never break the session, so parse defensively.
+async function readEvent() {
+  try {
+    return JSON.parse((await readStdin()) || '{}');
+  } catch {
+    return {};
+  }
+}
+
 function identity(evt) {
   const jobDir = process.env.CLAUDE_JOB_DIR;
   if (jobDir) {
@@ -69,35 +90,55 @@ function identity(evt) {
     return {
       name: `claude-${host}-job-${jobId}`,
       tag: `job-${jobId}`,
+      sessionKey: `job-${jobId}`,
+      mode: 'exact',
       delivery: { kind: 'claude-job', job_id: jobId, job_dir: jobDir },
     };
   }
   const sid = evt.session_id || '';
   const label = process.env.XATS_LABEL;
-  const name = label
-    ? `claude-${host}-${label}`
-    : sid
-      ? `claude-${host}-${sid.slice(0, 8)}`
-      : `claude-${host}-${evt.source || 'startup'}`;
-  return { name, tag: sid || 'no-session', delivery: null };
+  const explicit = (process.env.XATS_NAME || '').trim();
+  // The session id is the discriminator; the label is only a box-level prefix.
+  // Without a session id two sessions cannot be told apart, so fall back to a
+  // random suffix rather than a shared label-derived name (which would collapse
+  // every concurrent session into one identity).
+  const base = `claude-${host}${label ? `-${label}` : ''}`;
+  const short = sid ? createHash('sha256').update(sid).digest('hex').slice(0, 8) : '';
+  return {
+    name: explicit || `${base}-${short || randomUUID().slice(0, 8)}`,
+    tag: sid || 'no-session',
+    sessionKey: sid || null,
+    mode: explicit ? 'exact' : 'prefer',
+    delivery: null,
+  };
 }
 
 async function start() {
-  const evt = JSON.parse((await readStdin()) || '{}');
+  const evt = await readEvent();
   const id = identity(evt);
   // NOTE: the daemon rejects `delivery: null` (invalid_delivery/unknown_kind) —
   // the key must be OMITTED for interactive sessions, present only for jobs.
-  const body = { name: id.name, team: TEAM, agent_type: 'claude-code', device: host };
+  // Do NOT send `device`: the daemon owns its local device name (full hostname,
+  // dots normalized to dashes). Sending the short hostname here makes the
+  // daemon reject the register as device_spoofing_from_loopback on any dotted
+  // hostname. Omitting it makes the daemon use its own local device, exactly
+  // as the Pi and opencode adapters do.
+  const body = { name: id.name, team: TEAM, agent_type: 'claude-code', session_key: id.sessionKey ?? undefined, name_mode: id.mode };
   if (id.delivery) body.delivery = id.delivery;
   const resp = await post('/api/register', body);
   const agentId = resp && resp.agent_id;
   if (!agentId) return; // daemon unreachable — silently continue
 
   fs.writeFileSync(idFileFor(id.tag), agentId);
+  // The daemon is authoritative and may have disambiguated the name (name-2) or
+  // returned the name this session already owned; record it for observability.
+  if (resp && typeof resp.name === 'string' && resp.name) {
+    try { fs.writeFileSync(idFileFor(`${id.tag}.name`), resp.name); } catch { /* ignore */ }
+  }
 }
 
 async function end() {
-  const evt = JSON.parse((await readStdin()) || '{}');
+  const evt = await readEvent();
   const id = identity(evt);
   const f = idFileFor(id.tag);
   let agentId = null;
