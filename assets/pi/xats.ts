@@ -4,6 +4,7 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
+import { Text } from "@earendil-works/pi-tui";
 
 function resolveBaseUrl(): string {
   if (process.env.XATS_BASE_URL) return process.env.XATS_BASE_URL;
@@ -36,6 +37,18 @@ const BINDING_CAP = 200;
 
 type NameMode = "prefer" | "exact";
 type Binding = { name: string; at: number };
+
+/** Structured payload behind the themed inbox card (rendered by the xats-inbox renderer). */
+type InboxNotice = {
+  count: number;
+  messages: Array<{ from: string; subject?: string; body: string; needReply: boolean }>;
+};
+
+/** Collapse a body to one tidy line for the collapsed card. */
+function clip(text: string, max: number): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1).trimEnd() + "…";
+}
 
 let name = baseName;
 let nameMode: NameMode = "prefer";
@@ -149,9 +162,28 @@ export default function (pi: ExtensionAPI) {
       const summary = messages.map((m: any) =>
         `- from ${m.from_name}${m.subject ? `: ${m.subject}` : ""}${m.need_reply ? " (needs reply)" : ""}\n${m.body}`,
       ).join("\n\n");
-      // A real user message is intentionally used here: it is visible in the
-      // session and starts a turn (or queues a follow-up if Pi is busy).
-      pi.sendUserMessage(`<xats-inbox>\n${messages.length} new cross-agent message(s):\n${summary}\n\nAct on these messages now. If a message needs a reply, reply with xats_send.\n</xats-inbox>`, { deliverAs: "followUp" });
+      const notice: InboxNotice = {
+        count: messages.length,
+        messages: messages.map((m: any) => ({
+          from: String(m.from_name ?? "unknown"),
+          subject: m.subject ? String(m.subject) : undefined,
+          body: String(m.body ?? ""),
+          needReply: Boolean(m.need_reply),
+        })),
+      };
+      // A custom message, not a user message. It still enters LLM context and,
+      // with triggerTurn, still starts a turn when the agent is idle; the
+      // difference is that peers' mail no longer masquerades as something the
+      // user typed, and the card is drawn by the xats-inbox renderer.
+      pi.sendMessage(
+        {
+          customType: "xats-inbox",
+          content: `<xats-inbox>\n${messages.length} new cross-agent message(s):\n${summary}\n\nAct on these messages now. If a message needs a reply, reply with xats_send.\n</xats-inbox>`,
+          display: true,
+          details: notice,
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
     } catch {
       // The daemon may be restarted independently. The next interval retries.
     } finally {
@@ -190,7 +222,7 @@ export default function (pi: ExtensionAPI) {
     startSse();
     // fallback poll if SSE not connected within 4s
     setTimeout(() => { if (!es) startPoll(); }, 4000);
-    ctx.ui.setStatus("xats", id ? `xats: ${name}` : "xats: daemon unavailable");
+    ctx.ui.setStatus("xats", ctx.ui.theme.fg("muted", id ? `xats: ${name}` : "xats: daemon unavailable"));
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -203,6 +235,35 @@ export default function (pi: ExtensionAPI) {
     agentId = null;
     ctx.ui.setStatus("xats", "");
     if (id) await request("/api/deregister", { method: "POST", body: JSON.stringify({ agent_id: id }) }).catch(() => undefined);
+  });
+
+  // Themed card for the inbox notification. The model still receives the
+  // <xats-inbox> payload; this only changes what the person sees.
+  pi.registerMessageRenderer<InboxNotice>("xats-inbox", (message, { expanded }, theme) => {
+    const d = message.details;
+    if (!d) return undefined;
+    const gutter = theme.fg("borderMuted", "│");
+    const replyNeed = d.messages.filter((m) => m.needReply).length;
+    const lines: string[] = [
+      [
+        theme.fg("accent", "✉"),
+        theme.bold(theme.fg("customMessageLabel", "xats inbox")),
+        theme.fg("muted", "·"),
+        theme.fg("muted", `${d.count} new${replyNeed ? ` · ${replyNeed} need${replyNeed === 1 ? "s" : ""} reply` : ""}`),
+      ].join(" "),
+    ];
+    for (const m of d.messages) {
+      const badge = m.needReply ? " " + theme.fg("warning", "⚠ needs reply") : "";
+      lines.push(`${gutter} ${theme.fg("accent", m.from)}${badge}`);
+      if (m.subject) lines.push(`${gutter}   ${theme.bold(m.subject)}`);
+      const body = m.body.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+      const shown = expanded ? body : body.slice(0, 1);
+      for (const l of shown) lines.push(`${gutter}   ${theme.fg("dim", expanded ? l : clip(l, 96))}`);
+      if (!expanded && body.length > 1) {
+        lines.push(`${gutter}   ${theme.fg("muted", `… ${body.length - 1} more line(s) · ctrl+o expands`)}`);
+      }
+    }
+    return new Text(lines.join("\n"), 0, 0);
   });
 
   pi.registerTool({
