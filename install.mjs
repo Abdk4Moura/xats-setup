@@ -20,6 +20,8 @@ import { installOpencode, installMimocode, installHarnesses } from './lib/harnes
 import { installPi, ensurePiLabel } from './lib/pi.mjs';
 import { installOmp } from './lib/omp.mjs';
 import { installBridge } from './lib/bridge.mjs';
+import { installPeer } from './lib/peer.mjs';
+import { enablePeerService, disablePeerService, startPeerService, stopPeerService, restartPeerService, isPeerServiceEnabled } from './lib/peer-service.mjs';
 import { restartDaemon } from './lib/service.mjs';
 import { describeRun, writeManifest } from './lib/manifest.mjs';
 import { reset } from './lib/reset.mjs';
@@ -28,11 +30,12 @@ import { ensureDir } from './lib/log.mjs';
 import { readFileSync, existsSync } from 'node:fs';
 import * as readline from 'node:readline';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 const AGENTS = ['claude', 'pi', 'omp', 'opencode', 'mimocode'];
-const INFRA = ['daemon', 'service', 'bridge'];
-const ALL = [...INFRA.slice(0, 2), ...AGENTS, ...INFRA.slice(2)]; // daemon,service,claude,pi,opencode,mimocode,bridge
+const INFRA = ['daemon', 'service', 'bridge', 'peer'];
+const ALL = [...INFRA.slice(0, 2), ...AGENTS, ...INFRA.slice(2)]; // daemon,service,agents,bridge,peer
 const HARNESS_ALIAS = new Set(['opencode', 'mimocode', 'pi']); // back-compat: harness = opencode+mimocode+pi until removed
 
 function normalizeComponents(set) {
@@ -113,6 +116,12 @@ Options:
 Components: ${ALL.join(', ')}  (harness is deprecated alias for opencode,mimocode,pi)
 Agents: ${AGENTS.join(', ')} — pick any subset (default: all). Example: --only=daemon,service,pi
 
+Peer networking (installed with the peer component; listener remains off until opted in):
+  npx xats-setup peer run       start HTTPS + mDNS in the foreground
+  npx xats-setup peer enable    start now and install a user service at login
+  npx xats-setup peer disable   stop and remove the user service/firewall rule
+  npx xats-setup peer status    show candidates, paired peers, and connection state
+
 Interactive: running npx xats-setup in a terminal with no --only/--no- opens an
   easy picker — press Enter to keep all (recommended, so agents can talk in and out),
   or pick “customize” to toggle each agent on/off per prompt.
@@ -151,6 +160,8 @@ async function verifyBus(baseUrl, components, paths) {
   else if (components.has('claude')) log.ok('Claude skill present');
   if (components.has('opencode') && !existsSync(path.join(path.dirname(paths.opencodePlugins), 'plugins', 'xats-register.ts'))) log.warn('opencode plugin not found');
   else if (components.has('opencode')) log.ok('opencode plugin present');
+  if (components.has('peer') && !existsSync(path.join(paths.xatsRoot, 'peer', 'peer.mjs'))) log.warn('peer runtime not found');
+  else if (components.has('peer')) log.ok('peer runtime installed (not running)');
   return checks;
 }
 
@@ -166,6 +177,7 @@ function detectAgentFound(paths) {
     daemon: true,
     service: true,
     bridge: true,
+    peer: existsSync(path.join(paths.xatsRoot, 'peer', 'peer.mjs')),
   };
 }
 async function ask(rl, q) {
@@ -216,7 +228,40 @@ async function promptResetConfirm(components, paths) {
 }
 
 async function main() {
-  const opts = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (argv[0] === 'peer') {
+    const paths = getPaths();
+    const entry = path.join(paths.xatsRoot, 'peer', 'peer.mjs');
+    const subcommand = argv[1] || 'help';
+    if (subcommand === 'enable') { enablePeerService(paths); return; }
+    if (subcommand === 'disable') {
+      const managed = isPeerServiceEnabled(paths);
+      const serviceRemoved = disablePeerService(paths, { force: true });
+      if (!managed && !serviceRemoved && existsSync(entry) && existsSync(path.join(paths.xatsRoot, 'peer', 'control-port'))) spawnSync(process.execPath, [entry, 'stop'], { stdio: 'inherit', windowsHide: true });
+      return;
+    }
+    if (subcommand === 'start') {
+      const result = startPeerService(paths);
+      if (!result?.ok) throw new Error('could_not_start_peer_service');
+      return;
+    }
+    if (subcommand === 'stop') {
+      const result = stopPeerService(paths);
+      if (result.unmanaged && existsSync(entry) && existsSync(path.join(paths.xatsRoot, 'peer', 'control-port'))) spawnSync(process.execPath, [entry, 'stop'], { stdio: 'inherit', windowsHide: true });
+      else if (!result.ok) throw new Error('could_not_stop_peer_service');
+      return;
+    }
+    if (subcommand === 'restart') {
+      if (!restartPeerService(paths)) throw new Error('peer service is not enabled; use `xats-setup peer enable`');
+      return;
+    }
+    if (!existsSync(entry)) throw new Error('peer runtime not installed; run `xats-setup --only=peer` first');
+    const result = spawnSync(process.execPath, [entry, ...argv.slice(1)], { stdio: 'inherit', windowsHide: true });
+    if (result.error) throw result.error;
+    process.exitCode = result.status ?? 1;
+    return;
+  }
+  const opts = parseArgs(argv);
   if (opts.help) return help();
   setDry(opts.dry);
   if (opts.label) process.env.XATS_LABEL = opts.label;
@@ -371,6 +416,24 @@ async function main() {
     } catch {}
     setStepStatus('bridge','done','done');
   } else setStepStatus('bridge','skip','skipped');
+
+  if (opts.components.has('peer')) {
+    setStepStatus('peer','running','installing');
+    const wasPeerServiceEnabled = isPeerServiceEnabled(paths);
+    const peerInstall = installPeer(paths);
+    let peerServiceStatus = 'installed (stopped)';
+    if (wasPeerServiceEnabled && !peerInstall.updated) peerServiceStatus = 'up to date (service unchanged)';
+    else if (wasPeerServiceEnabled) {
+      const restarted = restartPeerService(paths);
+      if (isDry()) peerServiceStatus = 'updated (restart planned)';
+      else if (restarted) peerServiceStatus = 'updated and restarted';
+      else {
+        peerServiceStatus = 'updated (restart failed)';
+        log.warn('peer runtime updated but the enabled peer service could not be restarted');
+      }
+    }
+    setStepStatus('peer','done',peerServiceStatus);
+  } else setStepStatus('peer','skip','skipped');
 
   // Verify
   setStepStatus('verify','running','checking');

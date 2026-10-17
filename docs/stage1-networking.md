@@ -15,15 +15,21 @@ mDNS/DNS-SD discovers candidates only on multicast-reachable segments. It is not
 5. The remote instance presents the peer identity and asks for explicit approval. The initiating side also confirms the pairing result. On approval, both sides persist the peer's cryptographic identity, TLS certificate fingerprint, and a user label.
 6. Paired peers exchange rosters and relay messages. Status distinguishes candidate, awaiting approval, paired/connected, and unavailable. Users can list peers and revoke trust.
 
+### Operator workflow
+
+Install the `peer` component with the normal installer or `npx xats-setup --only=peer`. Installation only copies the isolated runtime and installs pinned dependencies; it does not open a listener. The local xats daemon must also be installed and running for agent roster/message federation; the default full install includes it. Use `xats-setup peer run` for a foreground session, or explicitly `xats-setup peer enable` to install and start a user service now and at login. `peer status`, `peer candidates`, `peer pending`, `peer peers`, and `peer revoke <device-id>` show the current state and manage trust.
+
+For LAN pairing, run `xats-setup peer pair <candidate-device-id>` on one instance, then inspect and approve the pending request on the other with `xats-setup peer approve <pending-id> --label <name>` (or deny it). For routed direct connectivity, create a short-lived invite with `xats-setup peer invite --endpoint https://<reachable-address>:<port> --out <private-file>` and accept it with `xats-setup peer pair --invite-file <private-file> --endpoint https://<joining-address>:<port>`. The invite file is a secret and should be deleted after use. Both listener addresses must be reachable directly; the service never scans ports or changes daemon binding.
+
 ## Identity, TLS, invite, and authentication
 
 - Each instance has a persistent Ed25519 signing key. `deviceId` is the first 128 bits of SHA-256 over its DER SubjectPublicKeyInfo. The private key is stored owner-only in the xats state directory.
 - The peer service uses HTTPS with a persistent self-signed TLS certificate. Its SHA-256 certificate fingerprint is bound to the Ed25519 identity in the pairing exchange and pinned in each peer record. Client verification must compare the pinned fingerprint; it must not disable TLS verification globally.
-- A version-1 invite contains: invite id (128 random bits), issue/expiry timestamps (expiry no more than 10 minutes), inviter device id/public key, reachable endpoint, and TLS certificate fingerprint. The inviter signs a canonical representation. A separate 256-bit random secret is delivered in the invite payload and is never sent in plaintext over the network or written to logs. The invite is invalidated after approval, denial, expiry, or explicit cancellation.
+- A version-1 invite contains: invite id (128 random bits), issue/expiry timestamps (expiry no more than 10 minutes), inviter device id/public key, reachable endpoint, and TLS certificate fingerprint. The inviter signs a canonical representation. A separate 256-bit random secret is delivered in the invite payload and is never sent in plaintext over the network or written to logs. The invite is invalidated after approval, denial, or expiry.
 - A pair request includes the invite id, a fresh 128-bit nonce, requester device id/public key, requester TLS fingerprint, an Ed25519 signature over canonical request fields, and HMAC-SHA-256 over those fields keyed by the invite secret. For LAN candidate pairing without a pre-shared invite, the candidate may request pairing without the HMAC, but still proves possession of its Ed25519 private key; the remote user must approve.
 - A valid request creates only a pending candidate. Approval is the only operation that writes a peer into the trust store. Rejecting/denying consumes the related invite. Duplicate nonces, expired invites, malformed keys, mismatched device ids, and replayed request ids are rejected.
 - After pairing, each network request is sent over TLS pinned to the peer certificate and carries a signature by the paired Ed25519 key over method, versioned path, timestamp, nonce/request id, and body hash. Enforce a bounded timestamp window and replay cache. Message IDs are idempotent across retries.
-- Each peer has per-peer authorization and rate/size limits. No shared fleet-wide bearer token. Revocation immediately removes that peer's authorization and reconnect state.
+- Each peer has identity-bound authorization; pair-request attempts are rate-limited per source address, and request bodies are size-bounded. There is no shared fleet-wide bearer token. Revocation immediately removes that peer's authorization and reconnect state.
 
 ## Versioned network surface
 
@@ -45,20 +51,21 @@ Malformed/oversized input, unsupported versions, unknown peer keys, stale timest
 
 ## Existing implementation mapping
 
-- `assets/daemon/cli.js` owns the local bus and defaults to loopback; preserve this boundary.
-- `assets/bridge/bridge.mjs` relays rosters/messages but its HTTP peer listener is loopback-only and is designed for the Filament bridge. Do not simply change its bind address or reuse its HTTP endpoints as a public Stage 1 API. Reuse/port only the relay semantics behind the new authenticated peer service.
-- `lib/peer-identity.mjs`, `lib/peer-pairing.mjs`, and `lib/peer-tls.mjs` implement Ed25519 identity, expiring signed invites bound to an HTTPS endpoint/certificate, one-use pairing proofs, inviter-side pending/approve/deny/revoke state, pinned TLS identities, and owner-only persistence.
-- `lib/peer-transport.mjs` implements a standalone HTTPS peer listener/client, identity-signed requests, TLS pin verification, replay protection, candidate info verification, request limits, and handler hooks. It has security-focused loopback tests but is not wired to the installer or daemon relay yet.
-- `lib/mdns-discovery.mjs` currently advertises/browses candidate-only records via `bonjour-service`; it is a tested helper but is not installed, started, or wired into the peer listener.
-- The installer/service/reset lifecycle does not yet manage a Stage 1 peer process. Network peer networking must be explicitly enabled and have update/reset behavior.
+- `assets/daemon/cli.js` owns the local bus and remains loopback-bound. Its local-only `GET /api/agents/all` route exposes a sanitized all-team roster to the peer runtime; the daemon's network API is never exposed.
+- `assets/bridge/bridge.mjs` remains the separate Filament bridge. Stage 1 does not change its bind address or reuse its plain-HTTP peer endpoints.
+- `lib/peer-identity.mjs`, `lib/peer-pairing.mjs`, and `lib/peer-tls.mjs` implement Ed25519 identity, expiring signed invites bound to an HTTPS endpoint/certificate, one-use pairing proofs, explicit approve/deny/revoke state, pinned TLS identities, and owner-only persistence.
+- `lib/peer-transport.mjs` is the isolated HTTPS peer listener/client with signed requests, TLS pin verification, replay protection, request limits, and authenticated roster/message handlers.
+- `lib/mdns-discovery.mjs` advertises/browses candidate-only records through pinned `bonjour-service`; `lib/peer-runtime.mjs` starts it alongside the peer listener and loopback control API.
+- `lib/peer-federation.mjs` synchronizes sanitized rosters, creates namespaced local shadow agents, forwards messages over paired HTTPS, maintains retry cursors and a persistent duplicate-delivery ledger, and stops routing immediately on revocation.
+- `lib/peer.mjs` installs the runtime in `~/.xats/peer`; `lib/peer-service.mjs` manages explicit user-service enable/start/stop/disable on systemd, launchd, and Windows Scheduled Tasks. A fresh install never enables the network service.
 
 ## Build and verification sequence
 
-1. Define and version identity, invite, TLS pinning, request signing, replay controls, trust storage, endpoints, and bind policy. No listener before this design is implemented.
-2. Implement a dedicated HTTPS peer service and local-only admin/control interface. Verify unknown peers cannot retrieve rosters or relay messages; verify paired requests require valid signatures and pinned TLS.
-3. Wire discovery and pairing UX: install `bonjour-service`, advertise/browse, candidate request, short-lived invite share/accept, explicit approval, list/status/revoke. Test stale/duplicate records and multicast unavailable behavior.
-4. Connect paired transport to local daemon/relay semantics; test roster and message exchange between two independent xats instances, duplicate delivery, disconnect/reconnect, and revocation.
-5. Integrate opt-in enablement, cross-platform lifecycle, update/reset, docs, and end-to-end checks on Linux/macOS/Windows.
+1. **Complete:** define identity, invite, TLS pinning, request signing, replay controls, trust storage, endpoints, and bind policy.
+2. **Complete:** implement the dedicated HTTPS peer service and loopback-only control interface; paired requests require signatures and pinned TLS.
+3. **Complete:** install and run candidate-only mDNS, invite create/accept, explicit approval, peer list/status/revoke; malformed and duplicate discovery records are covered by tests.
+4. **Complete:** federate sanitized rosters and agent messages over paired transport; test duplicate/replay handling, disconnect/reconnect, and revocation across two peer runtimes and a real local daemon.
+5. **Complete:** keep peer service opt-in; integrate cross-platform service enable/start/stop/disable, update restart, reset, shadow cleanup, and user docs. Verified with `npm test` (42 tests), cross-platform service-config tests, package dry-run, and a two-daemon message-delivery E2E over pinned HTTPS without Filament/Tunlion.
 
 ## Stage boundaries
 

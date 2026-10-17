@@ -2937,6 +2937,10 @@ function listAgentsForTeam(db, team, ttlMs) {
     }).map(toPublicAgentRow)
   };
 }
+function listAllAgents(db, ttlMs) {
+  const teams = db.prepare("SELECT DISTINCT team FROM agents ORDER BY team").all().map((row) => row.team);
+  return { agents: teams.flatMap((team) => listAgentsForTeam(db, team, ttlMs).agents) };
+}
 
 // src/daemon/tmux-pane-detect.ts
 import { execFile as execFile4 } from "node:child_process";
@@ -4615,6 +4619,11 @@ async function handleInbox(ctx, req, reply) {
   }
   return reply.send(result);
 }
+async function handleAllAgents(ctx, _req, reply) {
+  const result = listAllAgents(ctx.db);
+  if (isErrorResult(result)) return reply.code(503).send({ error: result.error });
+  return reply.send(result);
+}
 async function handleAgents(ctx, req, reply) {
   const query = req.query;
   const team = typeof query.team === "string" ? query.team : void 0;
@@ -4813,6 +4822,7 @@ function mountRestApi(app, db, deps = {}) {
   app.post("/api/send", (req, reply) => handleSend(ctx, req, reply));
   app.get("/api/inbox", (req, reply) => handleInbox(ctx, req, reply));
   app.get("/api/agents", (req, reply) => handleAgents(ctx, req, reply));
+  app.get("/api/agents/all", (req, reply) => handleAllAgents(ctx, req, reply));
   app.post("/api/register", (req, reply) => handleRegister(ctx, req, reply));
   app.post("/api/deregister", (req, reply) => handleDeregister(ctx, req, reply));
   app.post("/api/heartbeat", (req, reply) => handleHeartbeat(ctx, req, reply));

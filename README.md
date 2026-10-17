@@ -1,8 +1,9 @@
 # xats-setup
 
 One command, any OS. Stands up an identical **xats cross-agent bus** peer on
-Windows, macOS, or Linux — daemon, autostart service, Claude Code hooks,
-Pi extension, opencode/mimocode plugins, and the cross-machine bridge.
+Windows, macOS, or Linux — local daemon, agent integrations, legacy bridge, and an
+optional Stage 1 direct peer runtime. The daemon starts at login; the network peer
+listener stays off until you explicitly enable it.
 
 ```sh
 npx xats-setup
@@ -24,7 +25,8 @@ sudo** (everything lands under `~/.xats`). The only prerequisite is **Node ≥ 2
 | `opencode`| `xats-register` + `notify-unified` plugins + xats skill for opencode. |
 | `mimocode`| Same plugins + skill for mimocode. |
 | `harness` | Deprecated alias for `opencode,mimocode,pi` (kept for compat). |
-| `bridge`  | Installs the Node bridge (`~/.xats/bridge/bridge.mjs`, zero deps). Joining the mesh is a separate coordinated step. |
+| `bridge`  | Installs the legacy Node bridge (`~/.xats/bridge/bridge.mjs`). Joining its Filament mesh is a separate coordinated step. |
+| `peer`    | Installs Stage 1 direct-network HTTPS peer service and mDNS discovery. Network listening remains off until explicitly enabled. |
 
 ## Usage
 
@@ -33,6 +35,7 @@ npx xats-setup                 # interactive — press Enter for full peer (reco
 npx xats-setup --yes           # non-interactive full peer (CI / scripts)
 npx xats-setup --dry-run       # preview every action, change nothing
 npx xats-setup --only=daemon,service,pi   # just Pi on this box (no prompt)
+npx xats-setup --only=peer               # install the Stage 1 peer runtime only
 npx xats-setup --only=pi       # only Pi's extension+skill (needs a running daemon elsewhere)
 npx xats-setup --only=omp      # only OMP's extension+skill
 npx xats-setup --without claude,pi  # generic verb — exclude any list (aliases: --except/--exclude/--skip/--omit)
@@ -57,8 +60,57 @@ After install, restart Claude Code / Pi (`/reload` in Pi) / opencode so they reg
 To pin an exact name that survives every restart, set `XATS_NAME` (e.g. `XATS_NAME=lend-gpu-worker`). An agent can also claim a name at runtime with `xats_claim_name`; that binding is scoped to the session, so it returns on resume but a brand-new session starts from the computed default. The daemon is the authority: it disambiguates a colliding preferred name with a `-2` suffix and refuses an exact claim that a live agent already holds.
 Health check: `curl http://127.0.0.1:$(cat ~/.xats/port 2>/dev/null || echo 9100)/health` — setup also runs an ephemeral bus probe (`register → list → deregister`) and verifies each selected component’s files.
 
+## Stage 1 direct peer networking
+
+Stage 1 uses authenticated HTTPS directly between xats instances. mDNS/DNS-SD discovers untrusted candidates on multicast-capable LANs; routed peers use a short-lived invite shared out of band. It does not use Filament/Tunlion and cannot bypass a firewall/NAT that prevents direct IP connectivity. The local daemon remains bound to loopback; only the separate peer service listens on network interfaces.
+
+Installation alone does not open a listener. Agent roster and message federation also require the local xats daemon to be installed and running (the default full install includes it). Start the peer listener in the foreground:
+
+```sh
+xats-setup peer run
+```
+
+Or explicitly opt in to a user service that starts now and at login (systemd user service, macOS LaunchAgent, or Windows Scheduled Task):
+
+```sh
+xats-setup peer enable
+xats-setup peer status
+xats-setup peer stop
+xats-setup peer start
+xats-setup peer restart
+xats-setup peer disable    # stop and remove autostart/firewall rule
+```
+
+The peer listener binds all interfaces by default and selects a stable port from TCP 9110–9120. Review `xats-setup peer status` for addresses; if multiple are listed, choose the address the other machine can reach. `peer enable` is the explicit network-exposure action. On Windows it best-effort adds a firewall allow rule for the saved peer port (or the default 9110–9120 range on first launch). No daemon HTTP/MCP API is exposed.
+
+For LAN discovery, run the service on both machines, then:
+
+```sh
+xats-setup peer candidates
+xats-setup peer pair <candidate-device-id>   # sends a request; this is not trust
+xats-setup peer pending                      # on the other machine
+xats-setup peer approve <pending-id> --label laptop
+# or: xats-setup peer deny <pending-id>
+```
+
+For a routed/directly reachable peer, create an expiring invite on the inviter (after choosing its reachable address):
+
+```sh
+xats-setup peer invite --endpoint https://<reachable-address>:<port> --out ./xats-peer.invite
+```
+
+Transfer that owner-only file privately. On the joining machine, with its peer service already running:
+
+```sh
+xats-setup peer pair --invite-file ./xats-peer.invite --endpoint https://<joining-address>:<port>
+```
+
+The inviter must still explicitly approve the pending request. Invite codes are credentials: do not commit them, log them, or send them over an untrusted channel; delete the file after use. Both instances retain pinned identities after approval. Use `xats-setup peer peers` and `xats-setup peer revoke <device-id>` to manage trust. Paired agent rosters appear locally as namespaced `xpeer_…` shadow agents; messages sent to those agents are relayed over the authenticated peer service. Disconnects retry automatically, with duplicate delivery and revocation checks.
+
+Resetting with `npx xats-setup reset --only=peer` disables the peer service, removes its identity/trust state, and purges local peer shadow agents when the daemon is available. The legacy bridge below is separate and still requires Filament.
+
 ## Windows ↔ WSL
-Windows and WSL are separate loopback buses (`C:\Users\…\.xats` vs `~/.xats` in the distro). Setup detects `wsl.exe` + `~/.config/opencode` inside the distro and prints `WSL has opencode` guidance. To talk across, `wsl -- npx xats-setup --only=opencode,pi,daemon,service` inside WSL, then bridge both ends (`~/.xats/bridge/peers.json` on each, `bridge up` — needs `filament` on both). On Windows the installer picks a free port `9100-9104` (persists to `~/.xats/port`); `service` uses that port for `schtasks` + `Startup\xats-daemon.vbs`. First bind may trigger Windows Firewall — allow private networks.
+Windows and WSL are separate loopback buses (`C:\Users\…\.xats` vs `~/.xats` in the distro). Setup detects `wsl.exe` + `~/.config/opencode` inside the distro and prints `WSL has opencode` guidance. For Stage 1 direct networking, install/start the peer component on both sides and use an address reachable from the other side; WSL NAT/firewall rules may prevent direct access, in which case Stage 1 does not tunnel around them. For legacy mesh bridging, run `wsl -- npx xats-setup --only=opencode,pi,daemon,service` inside WSL, configure `~/.xats/bridge/peers.json` on each side, then `bridge up` (requires `filament` on both). On Windows the daemon installer picks a free port `9100-9104` (persists to `~/.xats/port`); `service` uses that port for the daemon Scheduled Task. First daemon bind may trigger Windows Firewall.
 
 ## Reset / uninstall
 
@@ -68,7 +120,7 @@ npx xats-setup reset
 npx xats-setup reset --dry-run
 ```
 
-Reset stops and unregisters the xats daemon service (if selected), removes `~/.xats` (or just `~/.xats/bridge` for bridge-only resets), removes
+Reset stops and unregisters the xats daemon and peer services (if selected), removes `~/.xats` (or just the selected component state for component-only resets), removes
 xats's Claude hook/MCP entry, its OpenCode/mimocode plugin entries and copied
 files, and Pi's `~/.pi/agent/extensions/xats.ts` plus xats skill — only for the selected components (`reset --only=pi` touches just Pi). It deliberately
 leaves unrelated harness settings, plugins, skills, and MCP servers intact.
@@ -82,9 +134,10 @@ npx xats-setup@latest
 ```
 
 It records what it installed in `~/.xats/manifest.json`, so a re-run **detects a
-prior version and migrates it**: overwrites the daemon build, hook, and plugins
-with the current ones, and — if the daemon build actually changed — restarts the
-daemon so the update takes effect. Same-version re-runs are a no-op refresh.
+prior version and migrates it**: overwrites the daemon build, peer runtime, hook, and plugins
+with the current ones, and restarts the daemon or explicitly enabled peer service
+when its runtime changed. A fresh peer install never starts a listener. Same-version
+re-runs are an idempotent refresh.
 
 Agents that stop heartbeating are reaped within ~a minute, so the Claude hook
 keeps an interactive session alive by **re-registering every 30s** (a plain
