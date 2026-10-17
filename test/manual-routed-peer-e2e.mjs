@@ -55,10 +55,13 @@ async function waitFor(check, timeoutMs = 20_000) {
   throw lastError || new Error('routed_peer_e2e_timeout');
 }
 
-function spawnInNamespace(namespace, args, { env = process.env, stdin = 'ignore' } = {}) {
-  const child = spawn('ip', ['netns', 'exec', namespace, process.execPath, ...args], {
+function spawnInNamespace(namespace, args, { env = process.env, stdin = 'ignore', hostName = null } = {}) {
+  const isolated = hostName
+    ? ['unshare', '--uts', '--ipc', '--pid', '--fork', '--mount', '--mount-proc', '--', 'sh', '-c', 'hostname "$XATS_NS_HOSTNAME"; exec "$@"', 'sh', process.execPath, ...args]
+    : [process.execPath, ...args];
+  const child = spawn('ip', ['netns', 'exec', namespace, ...isolated], {
     cwd: repoRoot,
-    env,
+    env: hostName ? { ...env, XATS_NS_HOSTNAME: hostName } : env,
     stdio: [stdin, 'pipe', 'pipe'],
   });
   const stdout = [];
@@ -107,9 +110,30 @@ async function startDaemon(namespace, id, dir) {
   return started;
 }
 
-function startWorker(namespace, stateDir, host) {
+function linkBytes(namespace, interfaceName) {
+  const read = (counter) => Number(execFileSync(
+    'ip',
+    ['netns', 'exec', namespace, 'cat', `/sys/class/net/${interfaceName}/statistics/${counter}`],
+    { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] },
+  ).trim());
+  const rx = read('rx_bytes');
+  const tx = read('tx_bytes');
+  if (!Number.isFinite(rx) || !Number.isFinite(tx)) throw new Error(`link_counters_unavailable:${namespace}:${interfaceName}`);
+  return { rx, tx };
+}
+
+function routerTransit(before) {
+  return {
+    legAToRouter: linkBytes(nsRouter, rA).rx - before[rA].rx,
+    legRouterToB: linkBytes(nsRouter, rB).tx - before[rB].tx,
+    legBToRouter: linkBytes(nsRouter, rB).rx - before[rB].rx,
+    legRouterToA: linkBytes(nsRouter, rA).tx - before[rA].tx,
+  };
+}
+
+function startWorker(namespace, stateDir, host, hostName) {
   fs.mkdirSync(stateDir, { recursive: true });
-  const { child } = spawnInNamespace(namespace, [workerEntry, stateDir, String(daemonPort), host], { stdin: 'pipe' });
+  const { child } = spawnInNamespace(namespace, [workerEntry, stateDir, String(daemonPort), host], { stdin: 'pipe', hostName });
   let stderrText = '';
   child.stderr.on('data', (data) => { stderrText += data.toString(); });
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -201,11 +225,17 @@ try {
   const daemonB = await startDaemon(nsB, 'routed-right', path.join(base, 'daemon-b'));
   const stateA = path.join(base, 'peer-a');
   const stateB = path.join(base, 'peer-b');
-  workerA = startWorker(nsA, stateA, ipA);
-  workerB = startWorker(nsB, stateB, ipB);
+  workerA = startWorker(nsA, stateA, ipA, 'xats-peer-left');
+  workerB = startWorker(nsB, stateB, ipB, 'xats-peer-right');
   const readyA = await workerA.ready;
   const readyB = await workerB.ready;
   assert.ok(readyA.peerPort > 0 && readyB.peerPort > 0);
+  assert.equal(readyA.hostName, 'xats-peer-left', 'left peer runs in its own host-namespace identity');
+  assert.equal(readyB.hostName, 'xats-peer-right', 'right peer runs in its own host-namespace identity');
+  assert.notEqual(readyA.hostName, readyB.hostName, 'the two peers are separate OS views, not one process pair');
+  assert.ok(readyA.endpoints.every((url) => !/127\.0\.0\.1|\[::1\]/.test(url)), `left peer exposes no loopback endpoint: ${readyA.endpoints}`);
+  assert.ok(readyB.endpoints.every((url) => !/127\.0\.0\.1|\[::1\]/.test(url)), `right peer exposes no loopback endpoint: ${readyB.endpoints}`);
+  const routerBefore = { [rA]: linkBytes(nsRouter, rA), [rB]: linkBytes(nsRouter, rB) };
 
   await workerA.request('api', { method: 'POST', path: '/api/register', body: { name: 'alice', team: 'default', role: 'worker', agent_type: 'custom' } });
   await workerB.request('api', { method: 'POST', path: '/api/register', body: { name: 'bob', team: 'default', role: 'worker', agent_type: 'custom' } });
@@ -242,11 +272,18 @@ try {
     return inbox.messages.find((message) => message.body === 'message across two routed namespaces');
   });
   assert.equal(delivered.body, 'message across two routed namespaces');
+  const transit = routerTransit(routerBefore);
+  for (const [leg, bytes] of Object.entries(transit)) {
+    assert.ok(bytes > 0, `router leg ${leg} must carry the peer traffic (saw ${bytes} bytes)`);
+  }
   console.log(JSON.stringify({
     ok: true,
-    topology: 'two isolated peer network namespaces on distinct subnets via a forwarding router namespace',
+    topology: 'two isolated peer network namespaces, each with its own hostname and PID namespace, on distinct subnets via a forwarding router namespace',
     routeAtoB: networkRoutes.routeAtoB,
     routeBtoA: networkRoutes.routeBtoA,
+    hostNames: [readyA.hostName, readyB.hostName],
+    peerEndpoints: [readyA.endpoints[0], readyB.endpoints[0]],
+    routerTransitBytes: transit,
     inviteEndpoint: endpointA,
     delivery: delivered.body,
     filament: false,

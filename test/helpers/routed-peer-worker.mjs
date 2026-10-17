@@ -1,3 +1,4 @@
+import os from 'node:os';
 import readline from 'node:readline';
 import { startPeerRuntime } from '../../lib/peer-runtime.mjs';
 
@@ -24,7 +25,14 @@ async function close() {
 }
 process.once('SIGTERM', () => { close().finally(() => process.exit(0)); });
 process.once('SIGINT', () => { close().finally(() => process.exit(0)); });
-emit({ type: 'ready', deviceId: runtime.identity.deviceId, peerPort: runtime.peerPort });
+emit({
+  type: 'ready',
+  deviceId: runtime.identity.deviceId,
+  peerPort: runtime.peerPort,
+  hostName: os.hostname(),
+  processId: process.pid,
+  endpoints: runtime.status().endpoints.map((endpoint) => endpoint.url),
+});
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of input) {

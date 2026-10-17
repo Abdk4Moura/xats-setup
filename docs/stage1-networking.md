@@ -69,7 +69,33 @@ The routed namespace test can also be run directly on Linux as root with `CAP_NE
 node test/manual-routed-peer-e2e.mjs
 ```
 
-It uses isolated network stacks and an explicit L3 router; it is a routing-topology integration test, not a test on two physical computers.
+It uses isolated network stacks and an explicit L3 router; it is a routing-topology integration test, not a test on two physical computers. It asserts that each peer runs under its own hostname and PID namespace, that no peer endpoint is a loopback address, and that the router's two veth legs each carried bytes during pairing and delivery, so the traffic provably crossed an L3 hop instead of staying inside one stack.
+
+### Two-machine check
+
+When two directly reachable computers are available, the same user-facing commands exercise the routed path across hosts. On host A:
+
+```sh
+xats-setup peer run --bind :: --port 9443 --no-mdns   # terminal 1
+xats-setup peer invite --endpoint https://<A-address>:9443 --out peer.invite
+```
+
+Transfer `peer.invite` to host B over an out-of-band private channel and delete it afterwards; it is short-lived and single-use. On host B:
+
+```sh
+xats-setup peer run --bind :: --port 9444 --no-mdns   # terminal 1
+xats-setup peer pair --invite-file peer.invite --endpoint https://<B-address>:9444 --label host-a
+```
+
+While the join waits, approve the request on host A (explicit approval is mandatory):
+
+```sh
+xats-setup peer pending
+xats-setup peer approve <PENDING_ID> --label host-b
+xats-setup peer peers  # both hosts: expect "connected" and a non-zero agent count
+```
+
+Only `<A-address>:9443` needs to be reachable from B for the invite, and `<B-address>:9444` from A for federation. The local daemon APIs stay bound to loopback on both hosts; only the peer listener is exposed. The invite file, device keys, and trust stores must never be shared.
 
 For a live LAN multicast check using the real `bonjour-service` browser and advertiser, run:
 
@@ -91,7 +117,7 @@ The script runs the bundled patched daemon asset and its pinned test-only depend
 2. **Complete:** implement the dedicated HTTPS peer service and loopback-only control interface; paired requests require signatures and pinned TLS.
 3. **Complete:** install and run candidate-only mDNS, invite create/accept, explicit approval, peer list/status/revoke; malformed and duplicate discovery records are covered by tests.
 4. **Complete:** federate sanitized rosters and agent messages over paired transport; test duplicate/replay handling, disconnect/reconnect, and revocation across two peer runtimes and a real local daemon.
-5. **Complete:** keep peer service opt-in; integrate cross-platform service enable/start/stop/disable, update restart, reset, shadow cleanup, and user docs. Verified with `npm test` (45 passing on this Linux host, including routed network-namespace E2E), `npm pack --dry-run`, the live mDNS-to-CLI pairing smoke, and automated real-daemon CLI invite/explicit-approval delivery without Filament/Tunlion.
+5. **Complete:** keep peer service opt-in; integrate cross-platform service enable/start/stop/disable, update restart, reset, shadow cleanup, and user docs. Verified with `npm test` (45 passing on this Linux host, including a routed network-namespace E2E that proves L3 transit through a forwarding router), `npm pack --dry-run`, the live mDNS-to-CLI pairing smoke, and automated real-daemon CLI invite/explicit-approval delivery without Filament/Tunlion. A physical two-host run uses the documented two-machine check above.
 
 ## Stage boundaries
 

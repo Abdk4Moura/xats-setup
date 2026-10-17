@@ -41,8 +41,16 @@ test('routed invite E2E: isolated peer subnets pair and federate through a route
   const proof = JSON.parse(proofLine);
   assert.equal(proof.ok, true);
   assert.match(proof.topology, /distinct subnets via a forwarding router/);
+  assert.match(proof.topology, /own hostname and PID namespace/);
   assert.match(proof.routeAtoB, /via 10\.245\./);
   assert.match(proof.routeBtoA, /via 10\.246\./);
+  assert.deepEqual(proof.hostNames, ['xats-peer-left', 'xats-peer-right']);
+  for (const url of proof.peerEndpoints) {
+    assert.doesNotMatch(url, /127\.0\.0\.1|\[::1\]/, `peer endpoint must be a routed address: ${url}`);
+  }
+  for (const [leg, bytes] of Object.entries(proof.routerTransitBytes)) {
+    assert.ok(bytes > 0, `router leg ${leg} must carry transit bytes, saw ${bytes}`);
+  }
   assert.equal(proof.delivery, 'message across two routed namespaces');
   assert.equal(proof.filament, false);
 });
