@@ -61,7 +61,7 @@ Malformed/oversized input, unsupported versions, unknown peer keys, stale timest
 
 ## Reproducible network-flow checks
 
-The automated `npm test` suite includes two CLI-handler flows, invoking `mainPeer` with the same arguments as `xats-setup peer`: `test/peer-discovery-flow.test.mjs` injects candidate-only mDNS records into the runtime, then pairs and approves over a non-loopback interface using real pinned-HTTPS requests (including fallback from a dead advertised address); `test/peer-federation.test.mjs` creates and accepts a short-lived invite over a non-loopback interface, then verifies roster/message exchange, reconnect, deduplication, and revocation.
+Run these commands from a repository checkout after `npm install`; the E2E daemon is launched from the bundled patched asset, not a user-installed daemon. The automated `npm test` suite includes CLI-handler flows invoking `mainPeer` with the same arguments as `xats-setup peer`: `test/peer-discovery-flow.test.mjs` injects candidate-only mDNS records, then pairs and approves over a non-loopback interface using real pinned-HTTPS requests (including fallback from a dead advertised address); `test/peer-federation.test.mjs` creates and accepts a short-lived invite over a non-loopback interface, then verifies roster/message exchange, reconnect, deduplication, and revocation. `test/real-daemon-cli-e2e.test.mjs` additionally launches two real daemon processes from the bundled patched asset using the pinned test-only `cross-agent-teams-mcp@0.7.4` devDependency, drives the invite/approval CLI flow, and verifies delivery between their actual local daemon APIs.
 
 For a live LAN multicast check using the real `bonjour-service` browser and advertiser, run:
 
@@ -72,10 +72,10 @@ node test/manual-peer-mdns-e2e.mjs
 For end-to-end delivery using two actual xats daemon processes and the user-facing invite/approval CLI, run:
 
 ```sh
-XATS_E2E_DAEMON_ENTRY=/path/to/installed/daemon/cli.js node test/manual-peer-real-daemon-e2e.mjs
+node test/manual-peer-real-daemon-e2e.mjs
 ```
 
-The script defaults to the daemon installed under `~/.xats/daemon`; set the environment variable when testing a prepared daemon prefix. It binds peer listeners on `::`, connects to a non-loopback interface address, and does not use Filament/Tunlion.
+The script runs the bundled patched daemon asset and its pinned test-only dependencies, so it does not require a separately installed daemon. It binds peer listeners on `::`, connects to a non-loopback interface address, and does not use Filament/Tunlion.
 
 ## Build and verification sequence
 
@@ -83,7 +83,7 @@ The script defaults to the daemon installed under `~/.xats/daemon`; set the envi
 2. **Complete:** implement the dedicated HTTPS peer service and loopback-only control interface; paired requests require signatures and pinned TLS.
 3. **Complete:** install and run candidate-only mDNS, invite create/accept, explicit approval, peer list/status/revoke; malformed and duplicate discovery records are covered by tests.
 4. **Complete:** federate sanitized rosters and agent messages over paired transport; test duplicate/replay handling, disconnect/reconnect, and revocation across two peer runtimes and a real local daemon.
-5. **Complete:** keep peer service opt-in; integrate cross-platform service enable/start/stop/disable, update restart, reset, shadow cleanup, and user docs. Verified with `npm test` (43 passing), `npm pack --dry-run`, the live mDNS-to-CLI pairing smoke, and a two-real-daemon CLI invite/explicit-approval E2E that delivered a message over a non-loopback interface without Filament/Tunlion.
+5. **Complete:** keep peer service opt-in; integrate cross-platform service enable/start/stop/disable, update restart, reset, shadow cleanup, and user docs. Verified with `npm test` (44 passing), `npm pack --dry-run`, the live mDNS-to-CLI pairing smoke, and an automated two-real-daemon CLI invite/explicit-approval E2E that delivered a message over a non-loopback interface without Filament/Tunlion.
 
 ## Stage boundaries
 

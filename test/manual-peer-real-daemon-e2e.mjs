@@ -1,5 +1,5 @@
-// Manual end-to-end proof using the installed xats daemon entrypoint and the user-facing peer CLI.
-// Set XATS_E2E_DAEMON_ENTRY to a cli.js with Fastify/better-sqlite3 dependencies beside it.
+// Manual end-to-end proof using the bundled patched daemon asset and the user-facing peer CLI.
+// fastify/better-sqlite3/MCP dependencies are provided by the pinned devDependency.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7,9 +7,9 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import { startPeerRuntime, callPeerControl } from '../lib/peer-runtime.mjs';
 import { mainPeer } from '../lib/peer-cli.mjs';
-import { DAEMON_PKG } from '../lib/constants.mjs';
 
 function reachableIPv4() {
   for (const entries of Object.values(os.networkInterfaces())) {
@@ -40,8 +40,9 @@ async function waitFor(check, timeoutMs = 20_000) {
   throw lastError || new Error('real_daemon_e2e_timeout');
 }
 
-const daemonEntry = process.env.XATS_E2E_DAEMON_ENTRY || path.join(os.homedir(), '.xats', 'daemon', 'node_modules', DAEMON_PKG, 'dist', 'cli.js');
-if (!fs.existsSync(daemonEntry)) throw new Error(`Set XATS_E2E_DAEMON_ENTRY to an installed xats daemon cli.js (missing: ${daemonEntry})`);
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const daemonEntry = path.join(repoRoot, 'assets', 'daemon', 'cli.js');
+if (!fs.existsSync(daemonEntry)) throw new Error(`bundled_daemon_missing: ${daemonEntry}`);
 const address = reachableIPv4();
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-real-peer-e2e-'));
 const daemons = [];
