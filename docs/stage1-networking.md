@@ -97,6 +97,15 @@ xats-setup peer peers  # both hosts: expect "connected" and a non-zero agent cou
 
 Only `<A-address>:9443` needs to be reachable from B for the invite, and `<B-address>:9444` from A for federation. The local daemon APIs stay bound to loopback on both hosts; only the peer listener is exposed. The invite file, device keys, and trust stores must never be shared.
 
+The same check runs as one command per machine, which also starts a bundled daemon, registers a local agent, and verifies message exchange in both directions:
+
+```sh
+node test/manual-cross-host-peer-e2e.mjs host --advertise <A-address> --invite-file peer.invite
+node test/manual-cross-host-peer-e2e.mjs join --advertise <B-address> --invite-file peer.invite
+```
+
+The host prints the pending id and waits; approval is an explicit `xats-setup peer approve <PENDING_ID> --label remote-host`. Each side ends with a JSON result containing the paired device id, the message it received, and `filament: false`.
+
 For a live LAN multicast check using the real `bonjour-service` browser and advertiser, run:
 
 ```sh
