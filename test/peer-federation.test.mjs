@@ -4,12 +4,24 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { startPeerRuntime, callPeerControl, pairUsingInvite } from '../lib/peer-runtime.mjs';
+import { startPeerRuntime, callPeerControl } from '../lib/peer-runtime.mjs';
+import { mainPeer } from '../lib/peer-cli.mjs';
 import { PEER_API_PREFIX, requestPeer } from '../lib/peer-transport.mjs';
 import { purgePeerShadows } from '../lib/peer-federation.mjs';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function reachableIPv4() {
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const item of entries || []) {
+      const family = typeof item.family === 'string' ? item.family : item.family === 4 ? 'IPv4' : 'IPv6';
+      if (family === 'IPv4' && !item.internal && net.isIP(item.address) === 4) return item.address;
+    }
+  }
+  return null;
+}
 
 async function waitFor(check, timeoutMs = 12_000) {
   const deadline = Date.now() + timeoutMs;
@@ -123,20 +135,23 @@ async function getInbox(port, team, name) {
   return daemonRequest(port, 'GET', `/api/inbox?team=${encodeURIComponent(team)}&name=${encodeURIComponent(name)}&since_event_id=0`);
 }
 
-async function pair(leftDir, rightDir, left, right) {
-  const leftEndpoint = `https://127.0.0.1:${left.peerPort}`;
-  const rightEndpoint = `https://127.0.0.1:${right.peerPort}`;
-  const created = await callPeerControl({ stateDir: leftDir, method: 'POST', endpoint: '/invite', body: { endpoint: leftEndpoint, ttlMs: 60_000 } });
-  const waiting = pairUsingInvite({ stateDir: rightDir, code: created.code, endpoint: rightEndpoint, timeoutMs: 8_000 });
+async function pair(leftDir, rightDir, left, right, reachableAddress) {
+  const leftEndpoint = `https://${reachableAddress}:${left.peerPort}`;
+  const rightEndpoint = `https://${reachableAddress}:${right.peerPort}`;
+  const invitePath = path.join(rightDir, 'transfer.invite');
+  await mainPeer(['invite', '--endpoint', leftEndpoint, '--out', invitePath], { stateDir: leftDir });
+  const waiting = mainPeer(['pair', '--invite-file', invitePath, '--endpoint', rightEndpoint, '--label', 'left-instance'], { stateDir: rightDir });
   const pending = await waitFor(async () => {
     const result = await callPeerControl({ stateDir: leftDir, endpoint: '/pending' });
     return result.pending[0] || null;
   });
-  await callPeerControl({ stateDir: leftDir, method: 'POST', endpoint: '/approve', body: { pendingId: pending.pendingId, label: 'right-instance' } });
+  await mainPeer(['approve', pending.pendingId, '--label', 'right-instance'], { stateDir: leftDir });
   await waiting;
 }
 
-test('paired instances exchange rosters/messages, reconnect, deduplicate retries, and enforce revocation', async (t) => {
+test('CLI invite pairing over a reachable interface enables roster/message federation, reconnect, dedupe, and revocation', async (t) => {
+  const reachableAddress = reachableIPv4();
+  if (!reachableAddress) return t.skip('no non-loopback IPv4 interface available for direct peer test');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-peer-federation-'));
   const leftDir = path.join(base, 'left');
   const rightDir = path.join(base, 'right');
@@ -161,11 +176,11 @@ test('paired instances exchange rosters/messages, reconnect, deduplicate retries
   const charlie = await daemonRequest(rightDaemon.port, 'POST', '/api/register', { name: 'charlie', team: 'project-x', role: 'worker', agent_type: 'custom' });
   const leftPeerDir = path.join(leftDir, 'peer');
   const rightPeerDir = path.join(rightDir, 'peer');
-  left = await startPeerRuntime({ stateDir: leftPeerDir, host: '127.0.0.1', port: 0, mdns: false, daemonPort: leftDaemon.port, onLog() {} });
-  right = await startPeerRuntime({ stateDir: rightPeerDir, host: '127.0.0.1', port: 0, mdns: false, daemonPort: rightDaemon.port, onLog() {} });
+  left = await startPeerRuntime({ stateDir: leftPeerDir, host: '::', port: 0, mdns: false, daemonPort: leftDaemon.port, onLog() {} });
+  right = await startPeerRuntime({ stateDir: rightPeerDir, host: '::', port: 0, mdns: false, daemonPort: rightDaemon.port, onLog() {} });
   const originalLeftPort = left.peerPort;
   const leftDeviceId = left.identity.deviceId;
-  await pair(leftPeerDir, rightPeerDir, left, right);
+  await pair(leftPeerDir, rightPeerDir, left, right, reachableAddress);
 
   const shadowOnLeft = await waitFor(async () => {
     await left.federation.syncOnce();
@@ -265,7 +280,7 @@ test('paired instances exchange rosters/messages, reconnect, deduplicate retries
   await right.federation.syncOnce();
   assert.equal(right.federation.status().peers.find((peer) => peer.deviceId === leftDeviceId)?.connected, false);
 
-  restartedLeft = await startPeerRuntime({ stateDir: leftPeerDir, host: '127.0.0.1', port: originalLeftPort, mdns: false, daemonPort: leftDaemon.port, onLog() {} });
+  restartedLeft = await startPeerRuntime({ stateDir: leftPeerDir, host: '::', port: originalLeftPort, mdns: false, daemonPort: leftDaemon.port, onLog() {} });
   const queued = await waitFor(async () => {
     await right.federation.syncOnce();
     await restartedLeft.federation.syncOnce();
