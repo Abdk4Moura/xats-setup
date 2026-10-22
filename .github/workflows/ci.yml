@@ -225,6 +225,11 @@ jobs:
           absent=$(comm -23 <(echo "$src") <(echo "$dist") || true)
           if [ -n "$absent" ]; then echo "::error::build is missing routes present in source: $absent"; exit 1; fi
           if [ -n "$extra" ]; then echo "::warning::build has routes not in source: $extra"; fi
+      - name: Demo (two agents, one message, end to end)
+        shell: bash
+        env:
+          XATS_SETUP_TEST_DEPS: ${{ github.workspace }}/node_modules
+        run: node scripts/demo.mjs --private
       - name: Endpoint + session_key smoke
         shell: bash
         env:
