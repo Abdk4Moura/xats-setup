@@ -212,19 +212,24 @@ jobs:
             grep -q "$route" daemon/dist/cli.js || { echo "::error::daemon build is missing $route"; missing=1; }
           done
           exit $missing
-      - name: Source and build must expose the same routes
+      - name: Source and build must expose exactly the intended routes
         shell: bash
         run: |
-          # The vendored bundle shipped 8 routes while its source described 3 and
-          # nothing noticed. Compare the two directly and fail on any drift.
+          # Set equality, both directions, against an explicit list:
+          #  - a route in source but missing from the build = a build regression
+          #  - a route in the build but not in source = a stale route surviving a
+          #    source deletion, which a one-way check would happily pass
+          # The expected set is 8: /api/events (SSE) was removed deliberately and
+          # is documented as a breaking change in daemon/CHANGELOG.md.
+          expected=$(printf '%s\n' api/agents api/agents/all api/deregister api/heartbeat api/inbox api/register api/send api/whoami | sort)
           src=$(grep -oE "'/api/[a-z_/]+'" daemon/src/daemon/rest-api.ts | tr -d "'" | sed 's|^/||' | sort -u)
           dist=$(grep -oE "api/[a-z_/]+" daemon/dist/cli.js | sort -u)
-          echo "--- source ---"; echo "$src"
-          echo "--- build ---";  echo "$dist"
-          extra=$(comm -13 <(echo "$src") <(echo "$dist") || true)
-          absent=$(comm -23 <(echo "$src") <(echo "$dist") || true)
-          if [ -n "$absent" ]; then echo "::error::build is missing routes present in source: $absent"; exit 1; fi
-          if [ -n "$extra" ]; then echo "::warning::build has routes not in source: $extra"; fi
+          echo "--- expected ---"; echo "$expected"
+          echo "--- source ---";   echo "$src"
+          echo "--- build ---";    echo "$dist"
+          if [ "$src" != "$expected" ]; then echo "::error::source route set differs from the intended set"; exit 1; fi
+          if [ "$dist" != "$expected" ]; then echo "::error::build route set differs from the intended set"; exit 1; fi
+          echo "route sets match exactly (8)"
       - name: Demo (two agents, one message, end to end)
         shell: bash
         env:
