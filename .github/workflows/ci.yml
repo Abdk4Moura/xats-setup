@@ -112,3 +112,29 @@ jobs:
           if (-not (Test-Path (Join-Path $sandbox '.pi\agent\skills\xats\SKILL.md'))) { throw 'pi skill missing' }
           if (-not (Test-Path (Join-Path $sandbox '.config\opencode\plugins\xats-register.ts'))) { throw 'opencode plugin missing' }
           Write-Output 'sandbox install OK'
+
+  # The suite skips 10 daemon-backed tests on a clean checkout (they need fastify
+  # + better-sqlite3). Skipping is right for contributors, but CI should run them:
+  # these cover per-session identity, name takeover and inbox isolation — the
+  # registration semantics agents depend on.
+  test-daemon:
+    name: test with daemon deps (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install daemon dependencies
+        run: npm install --prefix "${{ runner.temp }}/daemon-deps" --omit=dev --no-audit --no-fund cross-agent-teams-mcp@0.7.4
+      - name: Test with daemon dependencies
+        env:
+          XATS_SETUP_TEST_DEPS: ${{ runner.temp }}/daemon-deps/node_modules
+        run: npm test
