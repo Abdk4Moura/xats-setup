@@ -22,5 +22,11 @@
     "type": "git",
     "url": "https://github.com/Abdk4Moura/xats-daemon.git"
   },
-  "private": false
+  "private": false,
+  "files": [
+    "SOURCE.md",
+    "NOTICE",
+    "CHANGELOG.md",
+    "LICENSE"
+  ]
 }

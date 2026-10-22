@@ -227,5 +227,13 @@ jobs:
           if [ -n "$extra" ]; then echo "::warning::build has routes not in source: $extra"; fi
       - name: Endpoint + session_key smoke
         shell: bash
+        env:
+          XATS_SETUP_TEST_DEPS: ${{ github.workspace }}/node_modules
         run: |
-          npm test -- --test-name-pattern='every REST endpoint'
+          # Run the whole suite (the daemon tests need deps) and require the
+          # endpoint test to have PASSED by name — a skip must not look green.
+          npm test 2>&1 | tee "$RUNNER_TEMP/daemon-test.log"
+          status=${PIPESTATUS[0]}
+          grep -qE "^ok [0-9]+ - every REST endpoint the adapters rely on exists and answers$" "$RUNNER_TEMP/daemon-test.log" \
+            || { echo "::error::endpoint coverage did not run on this platform"; exit 1; }
+          exit "$status"
