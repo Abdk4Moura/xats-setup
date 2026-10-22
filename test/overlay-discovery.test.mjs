@@ -232,12 +232,18 @@ test('emits each peer once and reports it lost when it disappears', async () => 
 
 test('whichInPath honours PATH and PATHEXT without the installer helpers', async () => {
   const { whichInPath } = await import('../lib/overlay-discovery.mjs');
-  const exists = (p) => p === '/opt/ov/tunlion' || p === 'C:\\ov\\tailscale.exe';
-  assert.equal(whichInPath('tunlion', { PATH: '/opt/ov' }, exists), '/opt/ov/tunlion');
-  assert.equal(whichInPath('nope', { PATH: '/opt/ov' }, exists), null);
-  if (process.platform === 'win32') {
-    assert.equal(whichInPath('tailscale', { PATH: 'C:\\ov', PATHEXT: '.EXE' }, exists), 'C:\\ov\\tailscale.exe');
-  }
+  const path = await import('node:path');
+  const isWin = process.platform === 'win32';
+
+  // Build expectations with path.join: on Windows the separator is different and
+  // PATHEXT appends .EXE, so a hardcoded POSIX string is a broken test, not a
+  // broken implementation.
+  const dir = isWin ? 'C:\\ov' : '/opt/ov';
+  const target = path.join(dir, isWin ? 'tunlion.exe' : 'tunlion');
+  const exists = (p) => p.toLowerCase() === target.toLowerCase();
+
+  assert.equal(whichInPath('tunlion', { PATH: dir, PATHEXT: '.EXE' }, exists), target);
+  assert.equal(whichInPath('nope', { PATH: dir, PATHEXT: '.EXE' }, exists), null);
 });
 
 test('every peer on the overlay is offered, with its l3 state as a hint only', () => {

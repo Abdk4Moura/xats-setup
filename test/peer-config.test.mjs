@@ -44,8 +44,12 @@ test('saved config round-trips through a private file', (t) => {
   assert.equal(loaded.autoApprove, 'shared');
   assert.equal(loaded.overlay, 'tunlion');
   assert.deepEqual(loaded.overlayPeers, ['a.mesh']);
-  const mode = fs.statSync(path.join(dir, 'config.json')).mode & 0o777;
-  assert.equal(mode, 0o600);
+  // Windows has no POSIX mode bits: chmod is largely a no-op there and stat
+  // reports 0o666. The 0600 expectation only means anything on POSIX.
+  if (process.platform !== 'win32') {
+    const mode = fs.statSync(path.join(dir, 'config.json')).mode & 0o777;
+    assert.equal(mode, 0o600);
+  }
 });
 
 test('dotted keys set individual values and reject nonsense', (t) => {
