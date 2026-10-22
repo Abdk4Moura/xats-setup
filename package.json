@@ -15,14 +15,17 @@
   },
   "scripts": {
     "test": "node scripts/run-tests.mjs",
-    "build:daemon": "esbuild daemon/src/cli.ts --bundle --platform=node --format=esm --external:better-sqlite3 --external:fastify --external:@modelcontextprotocol/sdk --external:zod --external:json-schema-diff-validator --outfile=daemon/dist/cli.js"
+    "build:daemon": "esbuild daemon/src/cli.ts --bundle --platform=node --format=esm --external:better-sqlite3 --external:fastify --external:@modelcontextprotocol/sdk --external:zod --external:json-schema-diff-validator --outfile=daemon/dist/cli.js",
+    "prepublishOnly": "npm run build:daemon"
   },
   "files": [
     "install.mjs",
     "lib/",
     "assets/",
     "docs/",
-    "README.md"
+    "README.md",
+    "daemon/",
+    "scripts/"
   ],
   "keywords": [
     "xats",
