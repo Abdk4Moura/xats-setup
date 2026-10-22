@@ -1,0 +1,101 @@
+# Cross-platform CI for xats-setup.
+#
+# This is the project's own buildfarm: GitHub-hosted runners, so it never
+# contends with a shared worker lease, and it is the only practical way to cover
+# macOS — which had zero verification before this workflow existed.
+#
+# Two jobs:
+#   test          - the suite on Linux/macOS/Windows x Node 22 and 24
+#   install-smoke - the installer, in a sandboxed HOME, so it cannot touch the
+#                   runner's real home or install a service
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Test
+        # The suite spawns daemons and binds loopback ports; keep the output in
+        # the log for post-mortem and do not retry, so flakes stay visible.
+        run: npm test
+
+  install-smoke:
+    name: install smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # Dry run first: proves argument parsing without writing anything.
+      - name: Dry run (unix)
+        if: runner.os != 'Windows'
+        run: node install.mjs --dry-run --yes --only=pi,opencode
+
+      - name: Dry run (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: node install.mjs --dry-run --yes --only=pi,opencode
+
+      # Real install into a sandboxed home. No daemon, no service, no peer
+      # listener: only the filesystem components an agent needs.
+      - name: Install into sandbox (unix)
+        if: runner.os != 'Windows'
+        env:
+          HOME: ${{ runner.temp }}/home
+        run: |
+          mkdir -p "$HOME"
+          node install.mjs --only=pi,opencode -y --no-ephemeral
+          test -f "$HOME/.pi/agent/extensions/xats.ts"
+          test -f "$HOME/.pi/agent/skills/xats/SKILL.md"
+          test -f "$HOME/.config/opencode/plugins/xats-register.ts"
+          echo "sandbox install OK"
+
+      - name: Install into sandbox (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sandbox = Join-Path $env:RUNNER_TEMP 'home'
+          New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
+          $env:HOME = $sandbox
+          $env:USERPROFILE = $sandbox
+          node install.mjs --only=pi,opencode -y --no-ephemeral
+          if (-not (Test-Path (Join-Path $sandbox '.pi\agent\extensions\xats.ts'))) { throw 'pi extension missing' }
+          if (-not (Test-Path (Join-Path $sandbox '.pi\agent\skills\xats\SKILL.md'))) { throw 'pi skill missing' }
+          if (-not (Test-Path (Join-Path $sandbox '.config\opencode\plugins\xats-register.ts'))) { throw 'opencode plugin missing' }
+          Write-Output 'sandbox install OK'
