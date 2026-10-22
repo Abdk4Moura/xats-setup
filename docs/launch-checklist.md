@@ -14,7 +14,7 @@ before any public post.
 | 4 | Naming | **open** | `xats` vs `cross-agent-teams-mcp` appear side by side in README and error text. Pick one front-facing name. |
 | 5 | One-command demo | **cleared** | `npm run demo` starts two agents, delivers a message and reports latency (~13 ms locally); `--private` ignores any running bus, and CI runs it on every platform. | `xats demo`: starts two sessions, exchanges a message, shows both sides. Doubles as smoke test and reviewer-verifiable claim. |
 | 6 | Daemon repo public | **open** | Source ships inside the `xats-setup` tarball, so it is readable either way; a standalone public repo is the cleaner launch story. Your call. |
-| 7 | Security page | **open** | Threat model, especially prompt-injection via peer messages: approval model, `manual` default, loopback-only daemon, no inbound port, every message visible in the host UI. |
+| 7 | Security page | **cleared** | `docs/SECURITY.md`: trust boundaries table, the `manual`/`shared`/`open` decision with the reasoning for an allowlist, revocation, and an explicit prompt-injection section stating what remains after approval. | Threat model, especially prompt-injection via peer messages: approval model, `manual` default, loopback-only daemon, no inbound port, every message visible in the host UI. |
 
 ## CI gates
 
