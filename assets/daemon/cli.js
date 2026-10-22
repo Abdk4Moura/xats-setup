@@ -4986,18 +4986,29 @@ var ChannelWakeFanout = class {
 import { hostname } from "node:os";
 function resolveLocalDeviceLabel(explicit) {
   const raw = explicit ?? hostname();
-  if (raw.includes(":")) {
+  const derived = explicit === void 0;
+  // An explicit label is a contract: refuse it loudly if it cannot be used.
+  // A hostname is not: it is whatever the machine happens to be called, so it is
+  // normalised and, if still unusable, shortened deterministically with a suffix
+  // rather than preventing the daemon from starting at all.
+  if (raw.includes(":") && !derived) {
     throw new Error("invalid_device_label");
   }
   const normalized = raw.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
   if (normalized.length === 0) {
-    if (explicit !== void 0) {
+    if (!derived) {
       throw new Error("invalid_device_label");
     }
     return "local";
   }
   if (normalized.length > 64) {
-    throw new Error("invalid_device_label");
+    if (!derived) {
+      throw new Error("invalid_device_label");
+    }
+    // 55 + "-" + 8 hex = 64. Deterministic, so a restart keeps the same label;
+    // hash-suffixed, so two long hostnames that share a prefix stay distinct.
+    const digest = createHash("sha256").update(normalized).digest("hex").slice(0, 8);
+    return `${normalized.slice(0, 55).replace(/-+$/, "")}-${digest}`;
   }
   return normalized;
 }
