@@ -144,6 +144,9 @@ jobs:
             const os = require('node:os');
             console.log('platform :', process.platform, process.arch);
             console.log('os       :', os.type(), os.release());
+            // The daemon derives its device label from this; a hostname that
+            // normalises to empty makes it exit with invalid_device_label.
+            console.log('hostname :', JSON.stringify(os.hostname()), 'len', os.hostname().length);
             console.log('fastify  :', require.resolve('fastify'));
             const Database = require('better-sqlite3');
             const db = new Database(':memory:');

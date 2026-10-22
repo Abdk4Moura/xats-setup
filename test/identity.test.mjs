@@ -81,7 +81,11 @@ before(async () => {
   const port = await freePort();
   const proc = spawn(
     process.execPath,
-    [cli, "daemon", "--port", String(port), "--db", path.join(root, "data.db")],
+    // Pass an explicit device label: this test is about session identity, not
+    // about hostname normalisation. A runner hostname that normalises to empty
+    // (or exceeds 64 chars) makes the daemon exit with invalid_device_label,
+    // which is a different concern and is covered separately.
+    [cli, "daemon", "--device", "ident-test", "--port", String(port), "--db", path.join(root, "data.db")],
     {
       env: { ...process.env, CROSS_AGENT_TEAMS_MCP_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
