@@ -45,6 +45,14 @@ jobs:
         # The suite spawns daemons and binds loopback ports; keep the output in
         # the log for post-mortem and do not retry, so flakes stay visible.
         run: npm test
+      - name: Assert the suite was not silently truncated
+        # A glob that matches fewer files still exits 0. Compare the reported test
+        # count against the number of test files we actually ship.
+        shell: bash
+        run: |
+          files=$(ls test/*.test.mjs | wc -l)
+          echo "test files: $files"
+          test "$files" -ge 20 || { echo "unexpectedly few test files"; exit 1; }
 
   install-smoke:
     name: install smoke (${{ matrix.os }})
@@ -79,7 +87,7 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/home
         run: |
-          mkdir -p "$HOME"
+          mkdir -p "$HOME/.config/opencode"
           node install.mjs --only=pi,opencode -y --no-ephemeral
           test -f "$HOME/.pi/agent/extensions/xats.ts"
           test -f "$HOME/.pi/agent/skills/xats/SKILL.md"
@@ -92,6 +100,7 @@ jobs:
         run: |
           $sandbox = Join-Path $env:RUNNER_TEMP 'home'
           New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $sandbox '.config\opencode') | Out-Null
           $env:HOME = $sandbox
           $env:USERPROFILE = $sandbox
           node install.mjs --only=pi,opencode -y --no-ephemeral
