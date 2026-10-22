@@ -195,14 +195,29 @@ jobs:
       - run: npm ci
       - name: Build the daemon from source
         run: npm run build:daemon
-      - name: Assert the build contains every endpoint
+      - name: Assert the build contains every intended endpoint
         shell: bash
         run: |
+          # The intended set is 8, not the 9 the old vendored bundle served:
+          # /api/events (SSE) was removed on purpose and the pi adapter polls.
           missing=0
           for route in api/send api/inbox api/agents api/agents/all api/register api/deregister api/heartbeat api/whoami; do
             grep -q "$route" daemon/dist/cli.js || { echo "::error::daemon build is missing $route"; missing=1; }
           done
           exit $missing
+      - name: Source and build must expose the same routes
+        shell: bash
+        run: |
+          # The vendored bundle shipped 8 routes while its source described 3 and
+          # nothing noticed. Compare the two directly and fail on any drift.
+          src=$(grep -oE "'/api/[a-z_/]+'" daemon/src/daemon/rest-api.ts | tr -d "'" | sed 's|^/||' | sort -u)
+          dist=$(grep -oE "api/[a-z_/]+" daemon/dist/cli.js | sort -u)
+          echo "--- source ---"; echo "$src"
+          echo "--- build ---";  echo "$dist"
+          extra=$(comm -13 <(echo "$src") <(echo "$dist") || true)
+          absent=$(comm -23 <(echo "$src") <(echo "$dist") || true)
+          if [ -n "$absent" ]; then echo "::error::build is missing routes present in source: $absent"; exit 1; fi
+          if [ -n "$extra" ]; then echo "::warning::build has routes not in source: $extra"; fi
       - name: Endpoint + session_key smoke
         shell: bash
         run: |
