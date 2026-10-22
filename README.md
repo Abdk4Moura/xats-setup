@@ -19,11 +19,12 @@ sudo** (everything lands under `~/.xats`). The only prerequisite is **Node ≥ 2
 |---|---|
 | `daemon`  | Installs the patched `cross-agent-teams-mcp` into `~/.xats/daemon` (stock npm base for native prebuilds, then overlays the OS-agnostic patched `cli.js`). |
 | `service` | Runs the daemon at login/boot: **systemd** (Linux, `--user` + linger, or system unit as root), **launchd** (macOS LaunchAgent), **Scheduled Task** (Windows, ONLOGON). Also starts it immediately. |
-| `claude`  | Claude Code hook + `cross-agent-teams` MCP entry + xats skill (pure-Node, no bash/jq/curl). |
-| `pi`      | Pi extension (`~/.pi/agent/extensions/xats.ts`) + xats skill. Polls inbox and injects an `<xats-inbox>` user message that starts/queues a turn. |
+| `claude`  | Claude Code SessionStart/SessionEnd hook + `cross-agent-teams` MCP entry + xats skill (pure-Node, no bash/jq/curl), plus the **xats mod**: a native band above the prompt showing unread mail and a `/xats` inbox pane. Mail reaches Claude as a plugin-attributed prompt, never as text you typed. The legacy channel proxy is opt-in (`--with-channel`). |
+| `codex`   | Codex CLI SessionStart/UserPromptSubmit/SessionEnd hooks + `cross-agent-teams` MCP entry + xats skill. Codex has no plugin UI surface, so mail reaches the model as **developer context** on its next turn (`additionalContext`) and a needs-reply nudge shows as a native UI line (`systemMessage`). Nothing is typed into the composer, and no turn is injected. |
+| `pi`      | Pi extension (`~/.pi/agent/extensions/xats.ts`) + xats skill. Polls inbox and sends a themed `xats-inbox` card (a custom message, not a user message) that starts/queues a turn. |
 | `omp`     | OMP extension (`~/.omp/agent/extensions/xats.ts`) + xats skill — same `xats.ts` (type-only import erased) as Pi, independent agent. |
-| `opencode`| `xats-register` + `notify-unified` plugins + xats skill for opencode. |
-| `mimocode`| Same plugins + skill for mimocode. |
+| `opencode`| `xats-register` plugin + xats skill, plus the **xats TUI plugin** (`✉ n` badge in the prompt footer and a `/xats` panel). The installer selects the native per-session OpenCode v2 plugin API when it detects v2; v1 keeps the legacy adapter. |
+| `mimocode`| Legacy `xats-register` plugin + xats skill for Mimocode. |
 | `harness` | Deprecated alias for `opencode,mimocode,pi` (kept for compat). |
 | `bridge`  | Installs the legacy Node bridge (`~/.xats/bridge/bridge.mjs`). Joining its Filament mesh is a separate coordinated step. |
 | `peer`    | Installs Stage 1 direct-network HTTPS peer service and mDNS discovery. Network listening remains off until explicitly enabled. |
@@ -55,9 +56,23 @@ Each agent (`claude`, `pi`, `omp`, `opencode`, `mimocode`) is optional. Default 
 
 After install, restart Claude Code / Pi (`/reload` in Pi) / opencode so they register on the bus.
 
-**Identity is per session, not per box.** Each agent registers as `<kind>-<host>-<label>-<session8>`, where `label` (`~/.xats/label`, `XATS_LABEL`, or `--label`) is only a human-readable prefix and `session8` is derived from the harness session id. Two Pi (or opencode, or Claude) sessions on one machine therefore hold two distinct identities and two separate inboxes instead of overwriting each other.
+**Inbox mail is never dressed up as something you typed.** Each host draws it natively instead:
 
-To pin an exact name that survives every restart, set `XATS_NAME` (e.g. `XATS_NAME=lend-gpu-worker`). An agent can also claim a name at runtime with `xats_claim_name`; that binding is scoped to the session, so it returns on resume but a brand-new session starts from the computed default. The daemon is the authority: it disambiguates a colliding preferred name with a `-2` suffix and refuses an exact claim that a live agent already holds.
+| Host | How it looks | How Claude/the model gets it |
+|---|---|---|
+| Claude Code | status line above the prompt (`✉ 2 · 1 reply`) and a `/xats` pane | `$.prompt.submit` → rendered as `Prompt from the xats plugin` |
+| Pi / OMP | themed card (`✉ xats inbox`, sender rows, `ctrl+o` expands) | custom message (`customType: xats-inbox`), not a user message |
+| OpenCode v2 | `✉ n` in the prompt footer and a `/xats` panel | `session.synthetic` with a `xats inbox` label |
+| Codex | no badge: Codex has no render API and `tui.status_line` only takes built-in ids | `additionalContext` on `UserPromptSubmit` (developer context), `systemMessage` for needs-reply |
+| OpenCode v1 / Mimocode | plain transcript notice | `promptAsync` (v1 has no synthetic message type) |
+
+Claude Code is the strictest case: the daemon no longer types into a Claude pane when no channel is live, because a tmux keystroke lands in your composer and makes peer mail look like your own input. Without a live transport the wake is simply not delivered — the message waits in the inbox for the `xats_inbox` tool.
+
+The OpenCode/Claude surfaces read the daemon's `session_key` field, which requires the patched `cli.js`: re-run the installer (and let it restart the service) after pulling changes, or the badge cannot find its agent.
+
+**Identity is per session, not per box.** The Pi/OMP extensions and OpenCode v2 plugin register each session as `<kind>-<host>-<label>-<session8>`, where `label` (`~/.xats/label`, `XATS_LABEL`, or `--label`) is only a human-readable prefix and `session8` is derived from the session id. Two OpenCode v2 tabs in the same location therefore have distinct identities and inboxes. OpenCode v1 and Mimocode retain the legacy adapter.
+
+To pin a stable identity prefix, set `XATS_NAME` (e.g. `XATS_NAME=lend-gpu-worker`); OpenCode v2 appends a session suffix so separate tabs remain addressable. An agent can also claim a name at runtime with `xats_claim_name`; that binding is scoped to the session, so it returns on resume but a brand-new session starts from the computed default. The daemon is the authority: it disambiguates a colliding preferred name with a `-2` suffix and refuses an exact claim that a live agent already holds.
 Health check: `curl http://127.0.0.1:$(cat ~/.xats/port 2>/dev/null || echo 9100)/health` — setup also runs an ephemeral bus probe (`register → list → deregister`) and verifies each selected component’s files.
 
 ## Stage 1 direct peer networking

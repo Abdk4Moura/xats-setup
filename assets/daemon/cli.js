@@ -694,6 +694,7 @@ var AgentsRepo = class {
          runtime_ui_pid,
          delivery_kind,
          delivery_payload,
+         session_key,
          last_seen_at
        FROM agents
        WHERE team=?`;
@@ -711,6 +712,9 @@ var AgentsRepo = class {
       const agent = toAgentRow(row);
       return {
         ...agent,
+        // toAgentRow drops this column, but a client that knows only its own
+        // session id (the Claude Code mod) needs it to find its own agent.
+        session_key: row.session_key ?? null,
         online: isAgentLive(agent, { ttlMs })
       };
     });
@@ -2090,12 +2094,16 @@ async function dispatchClaude(deps, target, input) {
       };
     }
   }
-  if (paneId) return dispatchTmux(deps, paneId, input.content, input.skipGuard);
+  // Never fall back to typing into a Claude pane. A tmux keystroke lands in the
+  // person's composer, so peer mail would appear as if they typed it themselves.
+  // Without a live channel the wake is undeliverable; the message stays in the
+  // inbox for xats_inbox to pick up, which keeps the transcript honest.
   return {
     error: "no_transport_available",
     detail: {
       channel_subscribed: channelSubscribed,
-      tmux_pane_set: false
+      tmux_pane_set: Boolean(paneId),
+      tmux_keystroke_refused: true
     }
   };
 }
@@ -2235,7 +2243,7 @@ async function poke(deps, input) {
       return dispatchPoke(
         { tmuxPoke: tmuxPokeImpl },
         { agent_type: target.agent_type, delivery, tmux_pane_id: target.tmux_pane_id },
-        { content: input.prompt, meta: {}, skipGuard: input.skipGuard }
+        { content: input.prompt, meta: input.meta ?? {}, skipGuard: input.skipGuard }
       );
     }
     if (!target.tmux_pane_id) return { error: "tmux_pane_not_set" };
@@ -2258,7 +2266,7 @@ async function poke(deps, input) {
   return dispatchPoke(
     { channelWakeFanout: fanout, tmuxPoke: tmuxPokeImpl },
     { agent_type: target.agent_type, delivery, tmux_pane_id: target.tmux_pane_id },
-    { content: input.prompt, meta: {}, skipGuard: input.skipGuard }
+    { content: input.prompt, meta: input.meta ?? {}, skipGuard: input.skipGuard }
   );
 }
 
@@ -2918,6 +2926,7 @@ function toPublicAgentRow(row) {
     role: row.role,
     name: row.name,
     model: row.model,
+    session_key: row.session_key ?? null,
     tmux_pane_id: row.tmux_pane_id,
     delivery: projectDelivery(row.delivery),
     channel_session_id: row.delivery.kind === "claude-channel" ? row.delivery.channel_session_id : null,
@@ -3449,7 +3458,14 @@ function createAutoPokeImpl(db, _agents, channelWakeFanout) {
     const hint = buildAutoPokeHint(row, args.fromAgentId);
     const res = await poke(
       { db, callerAgentId: args.fromAgentId, allowCrossTeam: true, channelWakeFanout },
-      { target_agent_id: args.targetAgentId, prompt: hint, skipGuard: args.skipGuard }
+      {
+        target_agent_id: args.targetAgentId,
+        prompt: hint,
+        skipGuard: args.skipGuard,
+        // Structured attribution for channel-based transports (Claude Code).
+        // sendChannelWake drops keys that are not identifiers, so keep these plain.
+        meta: { from: String(row?.name ?? "xats"), source: "xats" }
+      }
     );
     if ("ok" in res && res.ok) return { ok: true };
     const err = res.error;

@@ -1,5 +1,5 @@
 ---
-name: xats
+name: cross-agent-teams
 description: "Cross-agent bus: coordinate with other agents via xats. Use when you receive an <xats-inbox> notification, need to contact another agent, are working as part of a multi-agent team, or the user mentions xats / cross-agent / another agent by name. Triggers: xats-inbox, xats-identity, cross-agent, another agent, send message to."
 ---
 

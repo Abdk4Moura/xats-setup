@@ -16,6 +16,7 @@ import { preflight } from './lib/preflight.mjs';
 import { installDaemon } from './lib/daemon.mjs';
 import { installService } from './lib/service.mjs';
 import { installClaude } from './lib/claude.mjs';
+import { installCodex } from './lib/codex.mjs';
 import { installOpencode, installMimocode, installHarnesses } from './lib/harness.mjs';
 import { installPi, ensurePiLabel } from './lib/pi.mjs';
 import { installOmp } from './lib/omp.mjs';
@@ -33,7 +34,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
-const AGENTS = ['claude', 'pi', 'omp', 'opencode', 'mimocode'];
+const AGENTS = ['claude', 'codex', 'pi', 'omp', 'opencode', 'mimocode'];
 const INFRA = ['daemon', 'service', 'bridge', 'peer'];
 const ALL = [...INFRA.slice(0, 2), ...AGENTS, ...INFRA.slice(2)]; // daemon,service,agents,bridge,peer
 const HARNESS_ALIAS = new Set(['opencode', 'mimocode', 'pi']); // back-compat: harness = opencode+mimocode+pi until removed
@@ -64,7 +65,7 @@ function applyExclude(raw, set) {
   }
 }
 function parseArgs(argv) {
-  const o = { components: new Set(ALL), force: false, dry: false, label: null, reset: false, explicit: false, nonInteractive: false, interactive: false, verbose: false };
+  const o = { components: new Set(ALL), force: false, dry: false, label: null, reset: false, explicit: false, nonInteractive: false, interactive: false, verbose: false, withChannel: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') o.dry = true;
@@ -75,6 +76,7 @@ function parseArgs(argv) {
     else if (a === 'reset' || a === '--reset') o.reset = true;
     else if (a === '--help' || a === '-h') o.help = true;
     else if (a === '--label') o.label = argv[++i];
+    else if (a === '--with-channel') o.withChannel = true;
     else if (a.startsWith('--only=')) { o.components = normalizeComponents(new Set(a.slice(7).split(',').map((s) => s.trim()).filter(Boolean))); o.explicit = true; }
     else if (a === '--only' && i + 1 < argv.length) { o.components = normalizeComponents(new Set(argv[++i].split(',').map((s) => s.trim()).filter(Boolean))); o.explicit = true; }
     else if (EXCLUDE_VERBS.some((v) => a === v || a.startsWith(v + '='))) {
@@ -106,6 +108,8 @@ Options:
   reset, --reset       remove files, config entries, and service owned by xats-setup
                        (respects --only/--no-; e.g. reset --only=pi)
   --only=a,b,c        install only these components (${ALL.join(',')})
+  --with-channel      also install the Claude Code channel proxy (legacy wake
+                      transport; the xats mod delivers by default)
   --without=a,b,c     exclude components (verb form — same as --no-* but generic)
                       aliases: --except, --exclude, --skip, --omit
                       e.g. --without claude,pi  or  --except=bridge
@@ -363,7 +367,8 @@ async function main() {
   if (opts.components.has('daemon') && lay && lay.updated && mode !== 'fresh')
     restartDaemon(paths, lay.entry, port);
 
-  if (opts.components.has('claude')) { setStepStatus('claude','running','wiring'); installClaude(paths); setStepStatus('claude','done','done'); } else setStepStatus('claude','skip','skipped');
+  if (opts.components.has('claude')) { setStepStatus('claude','running','wiring'); installClaude(paths, { withChannel: opts.withChannel, baseUrl: BASE_URL }); setStepStatus('claude','done','done'); } else setStepStatus('claude','skip','skipped');
+  if (opts.components.has('codex')) { setStepStatus('codex','running','wiring'); installCodex(paths, { baseUrl: BASE_URL }); setStepStatus('codex','done','done'); } else setStepStatus('codex','skip','skipped');
   if (opts.components.has('pi')) { setStepStatus('pi','running','wiring'); installPi(paths); setStepStatus('pi','done','done'); } else setStepStatus('pi','skip','skipped');
   if (opts.components.has('omp')) { setStepStatus('omp','running','wiring'); installOmp(paths); setStepStatus('omp','done','done'); } else setStepStatus('omp','skip','skipped');
   if (opts.components.has('opencode')) { setStepStatus('opencode','running','wiring'); installOpencode(paths); setStepStatus('opencode','done','done'); } else setStepStatus('opencode','skip','skipped');

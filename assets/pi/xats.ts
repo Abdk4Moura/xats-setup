@@ -4,7 +4,7 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Text } from "@earendil-works/pi-tui";
 
 function resolveBaseUrl(): string {
   if (process.env.XATS_BASE_URL) return process.env.XATS_BASE_URL;
@@ -54,6 +54,11 @@ let name = baseName;
 let nameMode: NameMode = "prefer";
 let sessionKey: string | null = null;
 let agentId: string | null = null;
+// Explicit inbox cursor. The daemon advances its own cursor when a read omits
+// since_event_id, so a read whose delivery then fails loses the message forever.
+// We pass our own cursor and only advance it after a message is handed over.
+let lastEventId = 0;
+let cursorSeeded = false;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let inboxTimer: ReturnType<typeof setInterval> | undefined;
 let es: any = null;
@@ -156,7 +161,17 @@ export default function (pi: ExtensionAPI) {
     if (!agentId || pollingInbox) return;
     pollingInbox = true;
     try {
-      const data = await request(`/api/inbox?team=${encodeURIComponent(team)}&name=${encodeURIComponent(name)}`);
+      // Seed once past the backlog so installing the extension does not replay
+      // history, using an explicit since (which never advances the daemon cursor).
+      if (!cursorSeeded) {
+        const backlog = await request(`/api/inbox?team=${encodeURIComponent(team)}&name=${encodeURIComponent(name)}&since_event_id=0`);
+        for (const m of backlog.messages ?? []) lastEventId = Math.max(lastEventId, Number(m.event_id) || 0);
+        cursorSeeded = true;
+        return;
+      }
+      const data = await request(
+        `/api/inbox?team=${encodeURIComponent(team)}&name=${encodeURIComponent(name)}&since_event_id=${lastEventId}`,
+      );
       const messages = data.messages ?? [];
       if (!messages.length) return;
       const summary = messages.map((m: any) =>
@@ -184,8 +199,11 @@ export default function (pi: ExtensionAPI) {
         },
         { deliverAs: "followUp", triggerTurn: true },
       );
+      // Only now is it safe to move the cursor: delivery succeeded.
+      for (const m of messages) lastEventId = Math.max(lastEventId, Number(m.event_id) || 0);
     } catch {
-      // The daemon may be restarted independently. The next interval retries.
+      // Delivery failed (session busy, host refused) — leave the cursor alone so
+      // the next tick retries instead of silently dropping peer mail.
     } finally {
       pollingInbox = false;
     }
@@ -239,7 +257,7 @@ export default function (pi: ExtensionAPI) {
 
   // Themed card for the inbox notification. The model still receives the
   // <xats-inbox> payload; this only changes what the person sees.
-  pi.registerMessageRenderer<InboxNotice>("xats-inbox", (message, { expanded }, theme) => {
+  pi.registerMessageRenderer<InboxNotice>("xats-inbox", (message, { expanded, outputPad }, theme) => {
     const d = message.details;
     if (!d) return undefined;
     const gutter = theme.fg("borderMuted", "│");
@@ -263,7 +281,12 @@ export default function (pi: ExtensionAPI) {
         lines.push(`${gutter}   ${theme.fg("muted", `… ${body.length - 1} more line(s) · ctrl+o expands`)}`);
       }
     }
-    return new Text(lines.join("\n"), 0, 0);
+    // Draw in the same padded, tinted shell Pi uses for its own custom
+    // messages. A bare Text reads as loose transcript output; the Box is what
+    // makes the card look native.
+    const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(lines.join("\n"), 0, 0));
+    return box;
   });
 
   pi.registerTool({

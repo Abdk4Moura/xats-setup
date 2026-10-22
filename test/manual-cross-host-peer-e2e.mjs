@@ -72,10 +72,11 @@ async function waitFor(check, label, timeoutMs = 300_000) {
 }
 
 const { role, options } = parseArgs(process.argv.slice(2));
+const useStubDaemon = options.daemon === 'stub';
 const advertise = options.advertise || firstExternalIPv4();
 if (!advertise || net.isIP(advertise) !== 4) throw new Error('pass --advertise <ipv4 reachable by the other machine>');
 if (role === 'join' && !options['invite-file']) throw new Error('join_requires_--invite-file');
-if (!fs.existsSync(daemonEntry)) throw new Error(`bundled_daemon_missing:${daemonEntry}`);
+if (!fs.existsSync(daemonEntry) && !useStubDaemon) throw new Error(`bundled_daemon_missing:${daemonEntry}`);
 
 const runId = options['run-id'] || randomUUID();
 const base = fs.mkdtempSync(path.join(os.tmpdir(), `xats-cross-host-${role}-`));
@@ -88,6 +89,7 @@ const inviteFile = role === 'host'
   : path.resolve(options['invite-file']);
 const message = `xats-cross-host:${runId}`;
 const reply = `xats-cross-host-reply:${runId}`;
+const ack = `xats-cross-host-ack:${runId}`;
 let daemon = null;
 let runtime = null;
 
@@ -95,11 +97,15 @@ async function startDaemon() {
   fs.mkdirSync(daemonHome, { recursive: true });
   const port = await freePort();
   const logs = [];
-  const child = spawn(process.execPath, [
-    daemonEntry, 'daemon', '--port', String(port), '--host', '127.0.0.1',
-    '--db', path.join(daemonHome, 'data.db'), '--pid-file', path.join(daemonHome, 'daemon.pid'),
-    '--device', `cross-host-${role}`,
-  ], { cwd: repoRoot, env: { ...process.env, CROSS_AGENT_TEAMS_MCP_HOME: daemonHome }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = useStubDaemon
+    ? spawn(process.execPath, [path.join(repoRoot, 'test', 'helpers', 'stub-daemon.mjs'), '--port', String(port)], {
+      cwd: repoRoot, env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    : spawn(process.execPath, [
+      daemonEntry, 'daemon', '--port', String(port), '--host', '127.0.0.1',
+      '--db', path.join(daemonHome, 'data.db'), '--pid-file', path.join(daemonHome, 'daemon.pid'),
+      '--device', `cross-host-${role}`,
+    ], { cwd: repoRoot, env: { ...process.env, CROSS_AGENT_TEAMS_MCP_HOME: daemonHome }, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', (data) => logs.push(data.toString()));
   child.stderr.on('data', (data) => logs.push(data.toString()));
   await waitFor(async () => {
@@ -176,6 +182,17 @@ try {
       return inbox.messages.find((item) => item.body === reply);
     }, 'reply_delivery');
     assert.equal(received.body, reply);
+    await api('POST', '/api/send', {
+      from: { team: 'default', name: localAgent[role] },
+      to: { team: 'default', name: remoteShadow.name },
+      subject: `cross-host-ack:${runId}`,
+      body: ack,
+    });
+    // Keep the host federation alive long enough to forward the final ack.
+    for (let i = 0; i < 16; i += 1) {
+      await runtime.federation.syncOnce().catch(() => {});
+      await delay(250);
+    }
     console.log(JSON.stringify({
       event: 'host-result',
       ok: true,
@@ -203,7 +220,12 @@ try {
       subject: `cross-host-reply:${runId}`,
       body: reply,
     });
-    console.log(JSON.stringify({ event: 'join-result', ok: true, runId, endpoint, received: received.body, replied: reply, filament: false }));
+    const acknowledged = await waitFor(async () => {
+      await runtime.federation.syncOnce();
+      const inbox = await api('GET', `/api/inbox?team=default&name=${localAgent[role]}&since_event_id=0`);
+      return inbox.messages.find((item) => item.body === ack);
+    }, 'ack_delivery');
+    console.log(JSON.stringify({ event: 'join-result', ok: true, runId, endpoint, received: received.body, replied: reply, ack: acknowledged.body, filament: false }));
   }
 } finally {
   await runtime?.close().catch(() => {});
