@@ -114,17 +114,21 @@ jobs:
           Write-Output 'sandbox install OK'
 
   # The suite skips 10 daemon-backed tests on a clean checkout (they need fastify
-  # + better-sqlite3). Skipping is right for contributors, but CI should run them:
-  # these cover per-session identity, name takeover and inbox isolation — the
-  # registration semantics agents depend on.
+  # + better-sqlite3). Skipping is right for contributors, but CI must run them:
+  # they cover per-session identity, name takeover and inbox isolation.
+  #
+  # `cross-agent-teams-mcp` is a devDependency, so `npm ci` already provides
+  # fastify and better-sqlite3 — no second install, no floating transitive tree.
   test-daemon:
     name: test with daemon deps (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Pin the macOS images: `macos-latest` moves, and native ABI is the thing
+        # under suspicion. 13 is x64, 14 is arm64.
+        os: [ubuntu-latest, macos-13, macos-14, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -132,9 +136,35 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Install daemon dependencies
-        run: npm install --prefix "${{ runner.temp }}/daemon-deps" --omit=dev --no-audit --no-fund cross-agent-teams-mcp@0.7.4
+
+      - name: Preflight native deps
+        shell: bash
+        run: |
+          node -e "
+            const os = require('node:os');
+            console.log('platform :', process.platform, process.arch);
+            console.log('os       :', os.type(), os.release());
+            console.log('fastify  :', require.resolve('fastify'));
+            const Database = require('better-sqlite3');
+            const db = new Database(':memory:');
+            db.exec('create table t(x)'); db.prepare('insert into t values (1)').run();
+            console.log('sqlite   :', db.prepare('select count(*) c from t').get().c, 'row(s)');
+            console.log('native   :', require.resolve('better-sqlite3/build/Release/better_sqlite3.node'));
+            db.close();
+          "
+          # The file type tells us arm64 vs x86_64 even when node's arch says otherwise.
+          NATIVE=$(node -p "require.resolve('better-sqlite3/build/Release/better_sqlite3.node')")
+          file "$NATIVE" || true
+
       - name: Test with daemon dependencies
+        shell: bash
         env:
-          XATS_SETUP_TEST_DEPS: ${{ runner.temp }}/daemon-deps/node_modules
-        run: npm test
+          XATS_SETUP_TEST_DEPS: ${{ github.workspace }}/node_modules
+        run: |
+          npm test 2>&1 | tee "$RUNNER_TEMP/test.log"
+          status=${PIPESTATUS[0]}
+          # A green run must not be a truncated run, and the daemon tests must
+          # actually have executed rather than skipped.
+          grep -q "# tests 90" "$RUNNER_TEMP/test.log" || { echo "::error::expected 90 tests"; exit 1; }
+          grep -q "# skipped 0" "$RUNNER_TEMP/test.log" || { echo "::error::daemon tests skipped instead of running"; exit 1; }
+          exit "$status"

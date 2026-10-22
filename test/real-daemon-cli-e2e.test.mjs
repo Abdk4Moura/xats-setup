@@ -6,20 +6,45 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-function hasReachableIPv4() {
+function nonLoopbackIPv4() {
   for (const entries of Object.values(os.networkInterfaces())) {
     for (const item of entries || []) {
       const family = typeof item.family === 'string' ? item.family : item.family === 4 ? 'IPv4' : 'IPv6';
-      if (family === 'IPv4' && !item.internal && net.isIP(item.address) === 4) return true;
+      if (family === 'IPv4' && !item.internal && net.isIP(item.address) === 4) return item.address;
     }
   }
-  return false;
+  return null;
+}
+
+/**
+ * Prove the address is usable, not merely present: bind a listener on it and
+ * connect back. An interface can exist while a hosted runner's firewall blocks
+ * child processes from binding or connecting, and "an interface exists" is not
+ * evidence that the E2E can run.
+ */
+async function canBindAndConnect(address) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    const timer = setTimeout(() => { try { server.close(); } catch {} resolve(false); }, 3000);
+    server.once('error', () => { clearTimeout(timer); resolve(false); });
+    server.listen(0, address, () => {
+      const { port } = server.address();
+      const socket = net.connect({ host: address, port });
+      const done = (ok) => { clearTimeout(timer); try { socket.destroy(); } catch {}; try { server.close(); } catch {}; resolve(ok); };
+      socket.once('connect', () => done(true));
+      socket.once('error', () => done(false));
+    });
+  });
 }
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 test('bundled daemon E2E: user-facing invite/approval CLI delivers between two real daemon processes', { timeout: 120_000 }, async (t) => {
-  if (!hasReachableIPv4()) return t.skip('no non-loopback IPv4 interface available for direct peer E2E');
+  const address = nonLoopbackIPv4();
+  if (!address) return t.skip('no non-loopback IPv4 interface for direct peer E2E');
+  if (!(await canBindAndConnect(address))) {
+    return t.skip(`cannot bind+connect on ${address} (host firewall blocks child processes)`);
+  }
   const child = spawn(process.execPath, [path.join(repoRoot, 'test', 'manual-peer-real-daemon-e2e.mjs')], {
     cwd: repoRoot,
     env: process.env,
