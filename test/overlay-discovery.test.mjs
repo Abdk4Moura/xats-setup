@@ -242,7 +242,11 @@ test('whichInPath honours PATH and PATHEXT without the installer helpers', async
   const target = path.join(dir, isWin ? 'tunlion.exe' : 'tunlion');
   const exists = (p) => p.toLowerCase() === target.toLowerCase();
 
-  assert.equal(whichInPath('tunlion', { PATH: dir, PATHEXT: '.EXE' }, exists), target);
+  // The returned path carries the PATHEXT casing (tunlion.EXE), which is a valid
+  // resolution on a case-insensitive filesystem — compare case-insensitively
+  // rather than forcing one spelling.
+  const resolved = whichInPath('tunlion', { PATH: dir, PATHEXT: '.EXE' }, exists);
+  assert.equal(String(resolved).toLowerCase(), target.toLowerCase());
   assert.equal(whichInPath('nope', { PATH: dir, PATHEXT: '.EXE' }, exists), null);
 });
 
