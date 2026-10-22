@@ -22,13 +22,17 @@ before any public post.
 - `install-smoke`: dry run then a real install into a sandboxed `HOME` on all three
   OSes, asserting the pi extension, pi skill and opencode plugin land where expected
 
-Two traps this CI exists to prevent:
+Three traps this CI exists to prevent:
 
-1. **Glob-dependent test discovery.** `node --test "test/**/*.test.mjs"` reported
-   **47 of 90** tests in CI while passing locally, and still exited 0. Test files
-   are enumerated explicitly by `scripts/run-tests.mjs` now, and CI asserts the
-   file count. Shell globbing alone also breaks on Windows `cmd`.
-2. **Installer skipping an absent agent.** `install.mjs` correctly skips an agent
+1. **Uncommitted source.** The first green-looking CI run executed **47 of 90**
+   tests because 5 test files (and the Claude mod, Codex component, overlay
+   discovery, peer config and OpenCode TUI plugin) had never been committed. CI
+   tested an older subset of the project and passed. The guard step now asserts
+   the test-file count, so an incomplete checkout fails instead of going green.
+2. **Glob-dependent test discovery.** Shell globbing breaks on Windows `cmd`, and
+   a glob that matches fewer files still exits 0. `scripts/run-tests.mjs`
+   enumerates `test/*.test.mjs` and passes explicit paths to `node --test`.
+3. **Installer skipping an absent agent.** `install.mjs` correctly skips an agent
    whose config dir does not exist, so a smoke test must create
    `.config/opencode` first — otherwise the assertion fails for the right reason.
 
