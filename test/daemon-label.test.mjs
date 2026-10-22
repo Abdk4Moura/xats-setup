@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const CLI = path.join(HERE, '..', 'assets', 'daemon', 'cli.js');
+const CLI = path.join(HERE, '..', 'daemon', 'dist', 'cli.js');
 
 function findDeps() {
   for (const dir of [process.env.XATS_SETUP_TEST_DEPS, path.join(os.homedir(), '.xats', 'daemon', 'node_modules')].filter(Boolean)) {

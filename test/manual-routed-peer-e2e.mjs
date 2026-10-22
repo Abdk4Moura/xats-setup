@@ -14,7 +14,7 @@ if (process.platform !== 'linux' || typeof process.getuid !== 'function' || proc
 }
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const daemonEntry = path.join(repoRoot, 'assets', 'daemon', 'cli.js');
+const daemonEntry = path.join(repoRoot, 'daemon', 'dist', 'cli.js');
 const workerEntry = path.join(repoRoot, 'test', 'helpers', 'routed-peer-worker.mjs');
 const cliRunner = path.join(repoRoot, 'test', 'helpers', 'peer-cli-runner.mjs');
 const suffix = `${process.pid.toString(36).slice(-4)}${Math.floor(Math.random() * 36).toString(36)}`;

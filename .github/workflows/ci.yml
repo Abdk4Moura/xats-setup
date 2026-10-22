@@ -174,3 +174,36 @@ jobs:
           grep -qE "^ok [0-9]+ - same preferred name from two sessions stays two distinct identities$" "$RUNNER_TEMP/test.log" \
             || { echo "::error::daemon-backed identity tests skipped instead of running"; exit 1; }
           exit "$status"
+
+  # The daemon is our source now (daemon/src). Build it and prove the endpoint
+  # set the adapters depend on, so a build can never silently drop a route the
+  # way the vendored bundle did (it shipped 8 routes while its map described 3).
+  daemon:
+    name: daemon build + endpoints (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build the daemon from source
+        run: npm run build:daemon
+      - name: Assert the build contains every endpoint
+        shell: bash
+        run: |
+          missing=0
+          for route in api/send api/inbox api/agents api/agents/all api/register api/deregister api/heartbeat api/whoami; do
+            grep -q "$route" daemon/dist/cli.js || { echo "::error::daemon build is missing $route"; missing=1; }
+          done
+          exit $missing
+      - name: Endpoint + session_key smoke
+        shell: bash
+        run: |
+          npm test -- --test-name-pattern='every REST endpoint'

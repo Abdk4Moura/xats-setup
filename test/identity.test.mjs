@@ -1,6 +1,6 @@
 // identity.test.mjs — the daemon's per-session identity rules.
 //
-// These run the real daemon (assets/daemon/cli.js) against a throwaway DB and
+// These run the real daemon (daemon/dist/cli.js) against a throwaway DB and
 // exercise /api/register. The overlay bundle needs the base package's
 // node_modules (fastify, the MCP SDK), which only exist after xats-setup has
 // installed the daemon on this machine. When those are absent the suite skips
@@ -18,7 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const CLI = path.join(HERE, "..", "assets", "daemon", "cli.js");
+const CLI = path.join(HERE, "..", "daemon", "dist", "cli.js");
 const TEAM = "default";
 const ROLE = "worker";
 

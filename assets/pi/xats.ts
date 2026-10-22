@@ -61,7 +61,6 @@ let lastEventId = 0;
 let cursorSeeded = false;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let inboxTimer: ReturnType<typeof setInterval> | undefined;
-let es: any = null;
 let pollingInbox = false;
 
 async function request(path: string, init?: RequestInit) {
@@ -213,22 +212,7 @@ export default function (pi: ExtensionAPI) {
     if (inboxTimer) return;
     inboxTimer = setInterval(() => { void pollInbox(); }, 3000);
   }
-  function startSse() {
-    const url = `${baseUrl}/api/events?team=${encodeURIComponent(team)}&name=${encodeURIComponent(name)}`;
-    try {
-      const ES = (globalThis as any).EventSource;
-      if (!ES) throw new Error('no ES');
-      es = new ES(url);
-      es.onmessage = () => { void pollInbox(); };
-      es.onerror = () => {
-        try { es?.close(); } catch { /* ignore: closing a dead stream */ }
-        es = null;
-        startPoll();
-      };
-    } catch {
-      startPoll();
-    }
-  }
+
 
   pi.on("session_start", async (_event, ctx) => {
     resolveIdentity(ctx);
@@ -236,17 +220,15 @@ export default function (pi: ExtensionAPI) {
     // Continue trying even if startup races the daemon service. It also
     // self-heals after daemon restarts and TTL reaping.
     heartbeatTimer = setInterval(() => { void keepAlive(); }, 30_000);
-    // Prefer SSE push, fallback to polling
-    startSse();
-    // fallback poll if SSE not connected within 4s
-    setTimeout(() => { if (!es) startPoll(); }, 4000);
+    // Polling is the delivery path: our daemon exposes no event stream, and a
+    // 3 s tick is imperceptible for agent-to-agent coordination.
+    startPoll();
     ctx.ui.setStatus("xats", ctx.ui.theme.fg("muted", id ? `xats: ${name}` : "xats: daemon unavailable"));
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (inboxTimer) clearInterval(inboxTimer);
-    if (es) { try { es.close(); } catch { /* ignore: closing a dead stream */ } es = null; }
     heartbeatTimer = undefined;
     inboxTimer = undefined;
     const id = agentId;
@@ -322,11 +304,9 @@ export default function (pi: ExtensionAPI) {
         if (previousId && previousId !== agentId) {
           await request("/api/deregister", { method: "POST", body: JSON.stringify({ agent_id: previousId }) }).catch(() => undefined);
         }
-        // The open SSE stream (and its inbox filter) was opened under the old
-        // name; reconnect it so delivery follows the new return address.
-        if (es) { try { es.close(); } catch { /* ignore */ } es = null; }
-        startSse();
-        return { content: [{ type: "text", text: `Now registered as \"${name}\" (team ${team}, role ${role}, agent_id ${agentId}). Give peers \"${name}\" as your return address.` }], details: {} };
+        // Delivery polls by name, so a rename takes effect on the next tick;
+        // there is no open stream to re-key.
+              return { content: [{ type: "text", text: `Now registered as \"${name}\" (team ${team}, role ${role}, agent_id ${agentId}). Give peers \"${name}\" as your return address.` }], details: {} };
       } catch (error: any) {
         if (error?.status === 409) {
           return { content: [{ type: "text", text: `\"${desired}\" is already taken by a live agent on team ${team}. Pick another name, or set XATS_NAME to pin it.` }], details: {}, isError: true };

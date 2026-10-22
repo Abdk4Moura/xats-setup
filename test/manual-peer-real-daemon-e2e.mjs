@@ -41,7 +41,7 @@ async function waitFor(check, timeoutMs = 20_000) {
 }
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const daemonEntry = path.join(repoRoot, 'assets', 'daemon', 'cli.js');
+const daemonEntry = path.join(repoRoot, 'daemon', 'dist', 'cli.js');
 if (!fs.existsSync(daemonEntry)) throw new Error(`bundled_daemon_missing: ${daemonEntry}`);
 const address = reachableIPv4();
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-real-peer-e2e-'));

@@ -1,0 +1,26 @@
+{
+  "name": "xats-daemon",
+  "version": "1.0.0",
+  "description": "xats cross-agent bus daemon. Derived from cross-agent-teams-mcp (MIT); maintained here, not tracking upstream.",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --external:better-sqlite3 --external:fastify --external:@modelcontextprotocol/sdk --external:zod --external:json-schema-diff-validator --outfile=dist/cli.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "better-sqlite3": "*",
+    "fastify": "*",
+    "@modelcontextprotocol/sdk": "*",
+    "zod": "*",
+    "json-schema-diff-validator": "*"
+  },
+  "devDependencies": {
+    "esbuild": "*"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Abdk4Moura/xats-daemon.git"
+  },
+  "private": false
+}

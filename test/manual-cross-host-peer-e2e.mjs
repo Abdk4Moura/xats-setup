@@ -18,7 +18,7 @@ import { startPeerRuntime, callPeerControl } from '../lib/peer-runtime.mjs';
 import { mainPeer } from '../lib/peer-cli.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const daemonEntry = path.join(repoRoot, 'assets', 'daemon', 'cli.js');
+const daemonEntry = path.join(repoRoot, 'daemon', 'dist', 'cli.js');
 const localAgent = { host: 'alice', join: 'bob' };
 const remoteAgent = { host: 'bob', join: 'alice' };
 

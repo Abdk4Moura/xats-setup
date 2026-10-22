@@ -1,0 +1,39 @@
+export type ChannelWakeSink = (payload: unknown) => void
+
+interface Entry {
+  sessionId: string
+  sink: ChannelWakeSink
+}
+
+export class ChannelWakeFanout {
+  private readonly entries = new Map<string, Entry>()
+
+  attach(channel_session_id: string, sink: ChannelWakeSink, sessionId: string): void {
+    this.entries.set(channel_session_id, { sessionId, sink })
+  }
+
+  detach(channel_session_id: string): void {
+    this.entries.delete(channel_session_id)
+  }
+
+  detachBySession(sessionId: string): void {
+    for (const [csid, entry] of this.entries) {
+      if (entry.sessionId === sessionId) this.entries.delete(csid)
+    }
+  }
+
+  send(channel_session_id: string, payload: unknown): boolean {
+    const entry = this.entries.get(channel_session_id)
+    if (!entry) return false
+    try {
+      entry.sink(payload)
+    } catch {
+      // sink failure is the caller's concern; swallow to preserve map state
+    }
+    return true
+  }
+
+  has(channel_session_id: string): boolean {
+    return this.entries.has(channel_session_id)
+  }
+}
