@@ -85,7 +85,10 @@ jobs:
       - name: Install into sandbox (unix)
         if: runner.os != 'Windows'
         env:
+          # Runner images set XDG_CONFIG_HOME pointing at the real home; the
+          # opencode path resolves from it, so sandboxing needs both.
           HOME: ${{ runner.temp }}/home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/home/.config
         run: |
           mkdir -p "$HOME/.config/opencode"
           node install.mjs --only=pi,opencode -y --no-ephemeral
@@ -103,6 +106,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $sandbox '.config\opencode') | Out-Null
           $env:HOME = $sandbox
           $env:USERPROFILE = $sandbox
+          $env:XDG_CONFIG_HOME = Join-Path $sandbox '.config'
           node install.mjs --only=pi,opencode -y --no-ephemeral
           if (-not (Test-Path (Join-Path $sandbox '.pi\agent\extensions\xats.ts'))) { throw 'pi extension missing' }
           if (-not (Test-Path (Join-Path $sandbox '.pi\agent\skills\xats\SKILL.md'))) { throw 'pi skill missing' }
