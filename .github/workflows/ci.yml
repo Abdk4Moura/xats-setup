@@ -41,6 +41,8 @@ jobs:
           cache: npm
       - name: Install
         run: npm ci
+      - name: Build the daemon (the endpoint test needs daemon/dist)
+        run: npm run build:daemon
       - name: Test
         # The suite spawns daemons and binds loopback ports; keep the output in
         # the log for post-mortem and do not retry, so flakes stay visible.
@@ -136,6 +138,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Build the daemon (the endpoint test needs daemon/dist)
+        run: npm run build:daemon
 
       - name: Preflight native deps
         shell: bash
