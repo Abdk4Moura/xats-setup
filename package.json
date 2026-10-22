@@ -25,7 +25,9 @@
     "docs/",
     "README.md",
     "daemon/",
-    "scripts/"
+    "scripts/",
+    "LICENSE",
+    "NOTICE"
   ],
   "keywords": [
     "xats",

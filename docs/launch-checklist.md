@@ -9,10 +9,12 @@ before any public post.
 |---|---|---|---|
 | 1 | macOS never verified | **cleared** | GitHub-hosted `macos-latest` in the matrix; suite passes on node 22 and 24. |
 | 2 | Windows never verified for the suite | **cleared** | `windows-latest` x node 22/24 green (installer smoke separately). |
-| 3 | Vendored daemon | **open** | `assets/daemon/cli.js` is a patched overlay of `cross-agent-teams-mcp@0.7.4`. For public distribution either upstream the patches or publish the delta. Shipping a silently patched third-party build is a trust problem. |
+| 3 | Vendored daemon | **cleared** | The daemon is ours: `daemon/src` built by `npm run build:daemon`, MIT, upstream credited in `daemon/NOTICE`, lineage stated in `daemon/SOURCE.md` (upstream basis `7c37997`, imported as a snapshot, **no merge base claimed**). The vendored `assets/daemon/cli.js` and the false `PROVENANCE.json` are deleted. |
+| 3b | Licence | **cleared** | Root `LICENSE` (MIT) + `NOTICE` crediting upstream; both shipped in the tarball. |
 | 4 | Naming | **open** | `xats` vs `cross-agent-teams-mcp` appear side by side in README and error text. Pick one front-facing name. |
 | 5 | One-command demo | **open** | `xats demo`: starts two sessions, exchanges a message, shows both sides. Doubles as smoke test and reviewer-verifiable claim. |
-| 6 | Security page | **open** | Threat model, especially prompt-injection via peer messages: approval model, `manual` default, loopback-only daemon, no inbound port, every message visible in the host UI. |
+| 6 | Daemon repo public | **open** | Source ships inside the `xats-setup` tarball, so it is readable either way; a standalone public repo is the cleaner launch story. Your call. |
+| 7 | Security page | **open** | Threat model, especially prompt-injection via peer messages: approval model, `manual` default, loopback-only daemon, no inbound port, every message visible in the host UI. |
 
 ## CI gates
 

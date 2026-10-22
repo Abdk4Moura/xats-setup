@@ -1,0 +1,9 @@
+xats-setup
+
+MIT licensed; see LICENSE.
+
+This project redistributes and builds a daemon derived from
+cross-agent-teams-mcp (https://github.com/jtianling/cross-agent-teams-mcp),
+MIT licensed. Copyright in that work remains with its authors. The daemon lives
+in `daemon/` and its lineage is described in `daemon/SOURCE.md` and
+`daemon/NOTICE`.
