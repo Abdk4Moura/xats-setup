@@ -52,7 +52,7 @@ async function waitForHealth(base, proc, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (proc.exitCode !== null)
-      throw new Error(`daemon exited early (code ${proc.exitCode})`);
+      throw new Error(`daemon exited early (code ${proc.exitCode})${daemonStderr ? `\n--- daemon stderr ---\n${daemonStderr.slice(-2000)}` : " (no stderr captured)"}`);
     try {
       const res = await fetch(`${base}/health`);
       if (res.ok) return true;
@@ -65,6 +65,8 @@ async function waitForHealth(base, proc, timeoutMs = 20_000) {
 }
 
 let env = null;
+// Child stderr, so a failed start reports why instead of just an exit code.
+let daemonStderr = "";
 
 before(async () => {
   const deps = findDeps();
@@ -86,10 +88,14 @@ before(async () => {
     },
   );
   const base = `http://127.0.0.1:${port}`;
+  // Keep the child's stderr: "exited early (code 1)" is unactionable on its own,
+  // and this is the only place that sees it.
+  daemonStderr = "";
+  proc.stderr?.on("data", (chunk) => { daemonStderr += String(chunk); });
   const up = await waitForHealth(base, proc);
   if (!up) {
     proc.kill("SIGKILL");
-    throw new Error(`daemon never became healthy on ${base}`);
+    throw new Error(`daemon never became healthy on ${base}${daemonStderr ? `\n--- daemon stderr ---\n${daemonStderr.slice(-2000)}` : ""}`);
   }
   env = { base, proc, root, db: path.join(root, "data.db"), deps };
 });
