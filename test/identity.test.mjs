@@ -104,10 +104,22 @@ before(async () => {
   env = { base, proc, root, db: path.join(root, "data.db"), deps };
 });
 
-after(() => {
+after(async () => {
   if (!env) return;
   env.proc.kill("SIGKILL");
-  fs.rmSync(env.root, { recursive: true, force: true });
+  // Windows cannot unlink a file SQLite still holds, and the kill is asynchronous,
+  // so the DB can still be open here. Wait for exit, then retry the removal
+  // instead of failing a green suite on cleanup.
+  await new Promise((resolve) => {
+    if (env.proc.exitCode !== null || env.proc.signalCode !== null) return resolve();
+    env.proc.once("exit", resolve);
+    setTimeout(resolve, 3000);
+  });
+  try {
+    fs.rmSync(env.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch {
+    // A leftover temp directory is not a test failure.
+  }
 });
 
 function register(body) {

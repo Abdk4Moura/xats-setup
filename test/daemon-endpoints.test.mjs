@@ -82,6 +82,17 @@ async function withDaemon(fn) {
     return await fn(base)
   } finally {
     proc.kill('SIGKILL')
+    await new Promise((resolve) => {
+      if (proc.exitCode !== null || proc.signalCode !== null) return resolve()
+      proc.once('exit', resolve)
+      setTimeout(resolve, 3000)
+    })
+    try {
+      // Windows cannot unlink a file SQLite still holds; retry rather than fail.
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    } catch {
+      /* leftover temp dir is not a failure */
+    }
   }
 }
 
