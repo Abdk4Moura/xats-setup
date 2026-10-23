@@ -128,9 +128,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pin the macOS images: `macos-latest` moves, and native ABI is the thing
-        # under suspicion. 13 is x64, 14 is arm64.
-        os: [ubuntu-latest, macos-13, macos-14, windows-latest]
+        # Pin the architecture that matters: macos-14 is arm64. macos-13 (x64) is
+        # deliberately absent — GitHub provisions it so slowly that one queued job
+        # held a whole run for ~50 minutes, and coverage that cannot be scheduled
+        # is not coverage. `macos-latest` in the `test` matrix still covers the OS.
+        os: [ubuntu-latest, macos-14, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
