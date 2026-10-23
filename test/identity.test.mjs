@@ -1,6 +1,6 @@
 // identity.test.mjs — the daemon's per-session identity rules.
 //
-// These run the real daemon (assets/daemon/cli.js) against a throwaway DB and
+// These run the real daemon (daemon/dist/cli.js) against a throwaway DB and
 // exercise /api/register. The overlay bundle needs the base package's
 // node_modules (fastify, the MCP SDK), which only exist after xats-setup has
 // installed the daemon on this machine. When those are absent the suite skips
@@ -18,7 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const CLI = path.join(HERE, "..", "assets", "daemon", "cli.js");
+const CLI = path.join(HERE, "..", "daemon", "dist", "cli.js");
 const TEAM = "default";
 const ROLE = "worker";
 
@@ -52,7 +52,7 @@ async function waitForHealth(base, proc, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (proc.exitCode !== null)
-      throw new Error(`daemon exited early (code ${proc.exitCode})`);
+      throw new Error(`daemon exited early (code ${proc.exitCode})${daemonStderr ? `\n--- daemon stderr ---\n${daemonStderr.slice(-2000)}` : " (no stderr captured)"}`);
     try {
       const res = await fetch(`${base}/health`);
       if (res.ok) return true;
@@ -65,6 +65,8 @@ async function waitForHealth(base, proc, timeoutMs = 20_000) {
 }
 
 let env = null;
+// Child stderr, so a failed start reports why instead of just an exit code.
+let daemonStderr = "";
 
 before(async () => {
   const deps = findDeps();
@@ -79,25 +81,45 @@ before(async () => {
   const port = await freePort();
   const proc = spawn(
     process.execPath,
-    [cli, "daemon", "--port", String(port), "--db", path.join(root, "data.db")],
+    // Pass an explicit device label: this test is about session identity, not
+    // about hostname normalisation. A runner hostname that normalises to empty
+    // (or exceeds 64 chars) makes the daemon exit with invalid_device_label,
+    // which is a different concern and is covered separately.
+    [cli, "daemon", "--device", "ident-test", "--port", String(port), "--db", path.join(root, "data.db")],
     {
       env: { ...process.env, CROSS_AGENT_TEAMS_MCP_HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
   const base = `http://127.0.0.1:${port}`;
+  // Keep the child's stderr: "exited early (code 1)" is unactionable on its own,
+  // and this is the only place that sees it.
+  daemonStderr = "";
+  proc.stderr?.on("data", (chunk) => { daemonStderr += String(chunk); });
   const up = await waitForHealth(base, proc);
   if (!up) {
     proc.kill("SIGKILL");
-    throw new Error(`daemon never became healthy on ${base}`);
+    throw new Error(`daemon never became healthy on ${base}${daemonStderr ? `\n--- daemon stderr ---\n${daemonStderr.slice(-2000)}` : ""}`);
   }
   env = { base, proc, root, db: path.join(root, "data.db"), deps };
 });
 
-after(() => {
+after(async () => {
   if (!env) return;
   env.proc.kill("SIGKILL");
-  fs.rmSync(env.root, { recursive: true, force: true });
+  // Windows cannot unlink a file SQLite still holds, and the kill is asynchronous,
+  // so the DB can still be open here. Wait for exit, then retry the removal
+  // instead of failing a green suite on cleanup.
+  await new Promise((resolve) => {
+    if (env.proc.exitCode !== null || env.proc.signalCode !== null) return resolve();
+    env.proc.once("exit", resolve);
+    setTimeout(resolve, 3000);
+  });
+  try {
+    fs.rmSync(env.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch {
+    // A leftover temp directory is not a test failure.
+  }
 });
 
 function register(body) {

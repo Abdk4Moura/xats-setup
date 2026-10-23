@@ -1,0 +1,6 @@
+{
+  "name": "xats",
+  "version": "0.1.0",
+  "description": "Draws xats cross-agent mail as native Claude Code UI and delivers it with plugin attribution",
+  "author": { "name": "xats" }
+}

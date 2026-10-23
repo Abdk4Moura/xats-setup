@@ -1,0 +1,9 @@
+xats-daemon
+
+This project contains code derived from cross-agent-teams-mcp
+(https://github.com/jtianling/cross-agent-teams-mcp), which is MIT licensed.
+Copyright in that original work remains with its authors.
+
+xats-daemon is maintained independently: it is not a tracking fork, and it does
+not claim to be any upstream release. See SOURCE.md for the lineage and for the
+list of changes made here.
