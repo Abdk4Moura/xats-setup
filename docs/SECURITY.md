@@ -1,84 +1,100 @@
 # Security model
 
-What xats protects, what it doesn't, and the decisions a user is actually making
-when they approve a peer. Written to be read by someone deciding whether to run
-this on a work machine.
+What Cross-Agent Teams protects, what it does not, and what a user decides when
+pairing a peer. This release builds on the earlier xats work, with substantial
+changes to the daemon, agent integrations, identity, and optional direct-peer
+transport. The npm installer remains `xats-setup`; older internal names such as
+`cross-agent-teams-mcp` remain for compatibility.
 
 ## The short version
 
-- The local bus is **loopback only**. Nothing about it is reachable from a
-  network unless you enable the peer listener, which is a separate, explicit,
-  per-machine opt-in.
-- **Discovery never grants trust.** Finding a peer — over mDNS, a VPN overlay, or
-  a relay — only makes it a *candidate*. A human approves it, once, per peer.
-- Peer traffic is authenticated and encrypted end to end. A relay can drop or
-  delay a message; it cannot read or forge one.
-- Messages from peers are **untrusted input**, exactly like a web page or an
-  email body. Approval says "I know this peer", not "everything it sends is
-  safe".
+- The local agent bus is bound to loopback. It is not exposed to the network by
+default. Enabling the separate peer service is an explicit network-listening
+choice.
+- Discovery finds candidates; it does not grant trust. A new peer still needs
+explicit approval. The current runtime requires manual approval even if saved
+configuration says `shared` or `open`; automatic approval for those modes is not
+implemented.
+- Paired peers communicate directly over HTTPS. Requests are authenticated
+with the peer's Ed25519 key and TLS is pinned to the paired certificate. This
+is not a signed per-message envelope or a sealed relay protocol.
+- Peer messages are untrusted input, like email or a web page. Pairing says you
+recognize the peer, not that its messages are safe.
 
 ## Trust boundaries
 
-| Boundary | Protected by |
+| Boundary | What the implementation provides |
 |---|---|
-| Other users on the same machine → your bus | loopback bind, per-user state directory, file permissions on identity keys |
-| Network → your bus | the daemon listens on loopback; the peer listener is a separate opt-in service on its own port |
-| Peer → your agents | explicit approval per peer; every message signed by the sender and verified before it reaches an agent |
-| Relay → your messages | payload sealed to the recipient's key; the relay is a dumb forwarder |
-| Peer → your **files** | nothing beyond what your agents choose to do. xats moves messages, not files. |
+| Network → local agent bus | The daemon binds to loopback. The separate peer listener is disabled until explicitly enabled. Loopback is not a per-user access-control boundary against other local processes. |
+| Network → peer listener | Direct HTTPS, pinned peer TLS certificates, and Ed25519 signatures on paired-peer requests. Request timestamps and nonces are checked to limit replay. |
+| Discovery → trust | mDNS and invites identify candidates only. A human approval is required before the peer is added to the local trust store. |
+| Paired peer → agents | Only a currently trusted peer can make authenticated federation requests. The message body is still untrusted model input. |
+| Relay → messages | No relay service or sealed-relay mode is shipped. Stage 1 connects peers directly. |
+| Peer → your files | xats transports messages and rosters; it does not provide file transfer. What an agent does with message content is outside the transport boundary. |
 
-## The approval decision
+The peer request signature covers the HTTP method, versioned path, timestamp,
+nonce, and body hash. TLS protects the direct connection and the peer certificate
+is pinned. Messages are not independently signed and encrypted as durable,
+recipient-sealed objects; do not describe transport authentication as end-to-end
+message-envelope security.
 
-`autoApprove` has three settings, and the default is the strict one:
+## Pairing and saved approval policy
 
-| Setting | Meaning |
-|---|---|
-| `manual` (**default**) | every new peer requires an explicit approval |
-| `shared` | auto-approve peers discovered on an overlay listed in `trustedOverlays` — sharing a network is a deliberate, per-overlay allowlist, never "any network I happen to be on" |
-| `open` | auto-approve any candidate that completes the handshake — only sane on a network you fully control |
+The supported approval behavior today is **manual**: a candidate request becomes
+pending, and a user explicitly approves or denies it. Discovery alone never adds
+a trusted peer.
 
-The reasoning behind `shared` being an allowlist rather than a blanket: a VPN or
-mesh commonly carries more than agents. A CI worker with a shell capability is
-not a reason to trust every agent that can also reach you there.
+The peer config parser accepts and saves `autoApprove: manual|shared|open`, and a
+policy helper exists, but the pairing runtime does not call that helper. Thus
+`shared` and `open` do **not** currently auto-approve peers. Leave the setting at
+`manual`; do not rely on the other values to change pairing behavior.
+
+Pairing invites are short-lived credentials used to establish a candidate
+connection. Keep them private and delete them after use. Possession of an invite
+is not itself trust: the inviter still approves the pending request.
 
 ## Revocation
 
-Revoking a peer is immediate and local: the trust store drops the record and the
-running daemon closes live links. Revocation is durable — the peer key stays
-refused rather than being silently re-accepted on reconnect.
+Revoking a peer removes its local trust record, stops federation/reconnect state,
+and causes subsequent requests from that peer to be rejected by this instance.
+Revocation is local, not a permanent global denylist: a peer could be paired
+again if a new request is made and a user explicitly approves it. Do not claim
+that a revoked key can never be accepted again.
 
 ## Prompt injection: the honest position
 
-A peer's message enters an agent's context. If that agent can run commands, a
-malicious peer message is a path to action. xats reduces the surface but does not
-eliminate it:
+A peer message can enter an agent's context. If that agent can use tools, a
+malicious message may influence actions. The transport cannot make the content
+safe:
 
-- **Only approved peers can deliver at all.** Unsolicited network input never
-  reaches a model.
-- **Every message is attributed** in the host UI (Claude band, OpenCode badge, pi
-  card), so a person can see that the text came from a peer, not from them.
-- **Nothing is typed into your composer.** The peer wake path deliberately refuses
-  to simulate keystrokes, so mail can never masquerade as your own input.
-- **Bodies are size-capped** and delivered as data inside a tagged block
-  (`<xats-inbox>`), not as instructions to the host.
+- Only currently paired peers can send federation traffic.
+- Host integrations label incoming notices as peer mail. This attribution helps
+  identify the source; it is not a model sandbox or a security policy.
+- Integrations avoid disguising peer mail as text typed by the user. Claude's
+  mod uses an attributed plugin prompt; other hosts use their own notice/context
+  mechanisms. A queued notice does not imply an in-flight task is interrupted.
+- Message-size limits bound request size, not the semantic risk of a message.
 
-What remains: an approved peer's text is still text in front of a capable agent.
-Treat approving a peer as being roughly as consequential as adding a collaborator
-to the repository — because that is what it is.
+Treat peer approval as granting a collaborator the ability to place text in an
+agent's working context. Review tool permissions and the agent's behavior
+accordingly.
 
 ## What is out of scope
 
-- A compromised local account. Anything running as you can read the state
-  directory and speak to the bus directly.
-- A malicious **approved** peer. Approval is the trust decision; the signatures
-  prove who sent a message, not that the sender is benign.
-- Denial of service from an approved peer (message floods). Caps and rate limits
-  bound the damage; they don't prevent it.
-- Side channels in the host agents themselves (a tool that misbehaves when handed
-  crafted text).
+- A compromised local account or malicious local process. The loopback service is
+  not an isolation boundary between users or processes on the same host.
+- A malicious approved peer, or prompt injection through a peer's content.
+- Denial of service by an approved peer. Request and body limits reduce some
+  resource risks but do not prevent all service disruption.
+- Peer connectivity when direct IP traffic is blocked by NAT, firewall, or
+  routing. Stage 1 does not tunnel around those restrictions.
+- Per-message signatures, recipient-sealed relays, offline/internet federation,
+  and automatic approval for `shared`/`open`; these are not shipped capabilities.
 
 ## Reporting
 
-Security issues: open a private advisory on the repository rather than a public
-issue, and include the daemon version (`/health` reports it) and the peer
-delivery path if relevant.
+Report security issues privately through the repository's security advisory
+process rather than a public issue. Include the package/build revision, platform,
+and the local or peer delivery path involved. The daemon's `/health` version is
+currently a static daemon version string; do not use it as proof of the npm
+package version.

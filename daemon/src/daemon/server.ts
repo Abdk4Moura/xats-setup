@@ -3,6 +3,7 @@ import { createServer as createHttpServer, type Server as HttpServer, type Incom
 import { openDb } from '../storage/db.js'
 import { applySchema } from '../storage/schema.js'
 import { AgentsRepo } from '../storage/agents-repo.js'
+import { ClaudeBindCapabilities } from '../mcp/claude-bind.js'
 import { makeAuthHook } from './auth.js'
 import { mountMcp } from '../mcp/transport.js'
 import { mountRestApi } from './rest-api.js'
@@ -60,6 +61,7 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     localDevice: opts.localDevice ?? resolveLocalDeviceLabel(),
   }
   applySchema(db, { localDevice: context.localDevice })
+  const claudeBind = new ClaudeBindCapabilities(db, context.localDevice)
   const startedAt = Date.now()
   const version = '0.1.0'
   const fanout = opts.fanout ?? new SseFanout()
@@ -75,11 +77,12 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     context,
     log: opts.mcpLog,
     orphanSessionLimit: orphanGcMaxSessions,
+    claudeBind,
   })
   // Loopback-only REST lifeboat. Mounted after the auth + origin-classification
   // onRequest hooks (above) and alongside mountMcp. Receives the same
   // channelWakeFanout used for send fan-out so /api/send pokes identically.
-  mountRestApi(app, db, { channelWakeFanout, context })
+  mountRestApi(app, db, { channelWakeFanout, context, claudeBind })
   app.get('/health', async () => ({
     ok: true,
     version,
@@ -111,7 +114,7 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   }, orphanGcIntervalMs)
   if (typeof orphanGcInterval.unref === 'function') orphanGcInterval.unref()
 
-  // Agent TTL reaper: deregister agents whose last_seen_at is older than the TTL.
+  // Agent TTL reaper: retain keyed Claude mailboxes as offline, deregister the rest.
   // REST-registered agents (delivery=none) have no persistent connection, so they
   // rely on periodic heartbeat (POST /api/heartbeat) to stay alive. Agents tied to
   // a persistent MCP session (channel_session_id) should be reaped on disconnect

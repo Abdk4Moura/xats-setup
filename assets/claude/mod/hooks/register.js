@@ -21,7 +21,7 @@
 
 // Stamped into /xats-status: if this string is not what you just deployed, the
 // host is running an older copy of the mod and nothing else you see matters.
-const MOD_BUILD = "2026-10-21T12:20Z-peer-config";
+const MOD_BUILD = "2026-10-25-mailbox-cursor-v5";
 
 let lastSessionID = "";
 let lastAgentsSeen = "none";
@@ -49,7 +49,20 @@ let agentId = null;
 let agentName = null;
 let team = "default";
 let lastEventId = 0;
+let acceptedEventId = 0;
+let cursorLoaded = false;
+let cursorPath = "";
+let cursorError = "";
+let mailboxCursor = null;
+let mailboxCursorError = "";
 let submitting = false;
+let polling = false;
+let deliveryScheduled = false;
+let nextSubmitAt = 0;
+let submitFailures = 0;
+let submitAttempts = 0;
+let submitOk = 0;
+let lastSubmitError = "";
 let resolving = 0;
 let lastError = "";
 let polls = 0;
@@ -127,16 +140,18 @@ function clip(text, max) {
 
 function summaryLine(message) {
   const subject = message.subject ? `: ${message.subject}` : "";
-  return `- from ${message.from_name || "unknown"}${subject}${message.need_reply ? " (needs reply)" : ""}`;
+  const eventId = Number(message.event_id);
+  const event = Number.isSafeInteger(eventId) && eventId >= 0 ? ` #${eventId}` : "";
+  return `-${event} from ${message.from_name || "unknown"}${subject}${message.need_reply ? " (needs reply)" : ""}`;
 }
 
 function payloadText(messages) {
   return [
     "<xats-inbox>",
-    `${messages.length} new cross-agent message(s):`,
+    `${messages.length} cross-agent notice(s):`,
     ...messages.map(summaryLine),
     "",
-    "Call the xats_inbox tool to read the full bodies and act on them.",
+    "Call mcp__cross-agent-teams__get_inbox to read the full bodies and act on them.",
     "</xats-inbox>",
   ].join("\n");
 }
@@ -161,37 +176,156 @@ async function resolveIdentity($, base) {
   return true;
 }
 
-async function deliver($, base) {
-  if (submitting || pending.length === 0) return;
-  const batch = pending.splice(0, pending.length);
-  submitting = true;
+async function acceptedCursorPath($) {
+  const sessionID = await sessionIDOf($);
+  // A session id is a UUID on supported hosts. Never allow a host-supplied
+  // path separator (or a long arbitrary string) into the filename.
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(sessionID)) return "";
+  const home = (await $.env.get("HOME")) || (await $.env.get("USERPROFILE")) || "";
+  if (!home) return "";
+  const sep = home.includes("\\") ? "\\" : "/";
+  return `${home}${sep}.xats${sep}sessions${sep}${sessionID}.cursor.json`;
+}
+
+async function loadAcceptedCursor($) {
+  if (cursorLoaded) return;
+  cursorLoaded = true;
+  cursorPath = await acceptedCursorPath($);
+  if (!cursorPath) return;
   try {
-    // Plain submit: Claude Code attributes this to the plugin. `asUser` is not
-    // an option here — peer mail must never look like the person typed it.
-    await $.prompt.submit({ text: payloadText(batch) });
-  } catch (error) {
-    lastError = `submit: ${error && error.message ? error.message : error}`;
-    // Put the batch back so the next poll can retry it.
-    pending = batch.concat(pending);
-  } finally {
-    submitting = false;
-    await $.ui.invalidate("ui.render").catch(() => {});
+    const saved = JSON.parse(String((await $.fs.read(cursorPath)) ?? ""));
+    if (saved?.version === 1 && saved.agent_id === agentId &&
+        Number.isSafeInteger(saved.event_id) && saved.event_id >= 0) {
+      acceptedEventId = saved.event_id;
+      lastEventId = Math.max(lastEventId, acceptedEventId);
+    } else if (saved?.agent_id && saved.agent_id !== agentId) {
+      cursorError = "previous agent id ignored";
+    }
+  } catch {
+    // Missing/torn cursor means replay, never skip. Do not seed from the
+    // daemon's current max: mail could have arrived during this reload.
   }
 }
 
-async function poll($) {
-  polls += 1;
-  const base = await baseUrl($);
+async function persistAcceptedCursor($, batch) {
+  const eventId = batch.reduce((max, message) => {
+    const id = Number(message.event_id);
+    return Number.isSafeInteger(id) && id >= 0 ? Math.max(max, id) : max;
+  }, acceptedEventId);
+  if (eventId <= acceptedEventId) return;
+  acceptedEventId = eventId;
+  if (!cursorPath) return;
   try {
+    await $.fs.write(cursorPath, `${JSON.stringify({ version: 1, agent_id: agentId, event_id: eventId })}\n`);
+    cursorError = "";
+  } catch (error) {
+    // The prompt was accepted; never requeue it just because persistence
+    // failed. A later reload may replay it, which is safer than losing it.
+    cursorError = String(error && error.message ? error.message : error);
+  }
+}
+
+async function readMailboxCursor($, base) {
+  const url = `${base}/api/cursor?agent_id=${encodeURIComponent(agentId)}`;
+  try {
+    const data = await readJson($, url);
+    const cursor = data.last_processed_event_id;
+    if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("invalid mailbox cursor response");
+    mailboxCursor = cursor;
+    mailboxCursorError = "";
+    return cursor;
+  } catch (error) {
+    // Cursor lookup is advisory. If it fails, keep the established behavior:
+    // still notify rather than silently suppressing mail.
+    mailboxCursorError = String(error && error.message ? error.message : error);
+    return null;
+  }
+}
+
+function dropConsumedPending(cursor) {
+  const before = pending.length;
+  pending = pending.filter((message) => {
+    const eventId = Number(message.event_id);
+    return !Number.isSafeInteger(eventId) || eventId > cursor;
+  });
+  return before - pending.length;
+}
+
+async function invalidate($) {
+  // Claude's mods API may return void, not a Promise. Calling `.catch` on
+  // `undefined` aborted the original poll before it scheduled delivery.
+  try { await $.ui.invalidate("ui.render"); } catch { /* cosmetic redraw */ }
+}
+
+async function deliver($) {
+  if (submitting || pending.length === 0) return;
+  submitting = true;
+  let batch = [];
+  try {
+    // Check immediately before submission as well as during each poll, because
+    // the person may read the MCP inbox while the notice is in its debounce.
+    try {
+      const base = await baseUrl($);
+      const cursor = await readMailboxCursor($, base);
+      if (cursor !== null) dropConsumedPending(cursor);
+    } catch (error) {
+      mailboxCursorError = String(error && error.message ? error.message : error);
+    }
+    if (pending.length === 0) return;
+
+    batch = pending.splice(0, pending.length);
+    submitAttempts += 1;
+    // Plain submit: Claude Code attributes this to the plugin. `asUser` is not
+    // an option here — peer mail must never look like the person typed it.
+    const result = await $.prompt.submit({ text: payloadText(batch) });
+    if (result?.ok === false) throw new Error(result.error || "prompt_submit_refused");
+    submitOk += 1;
+    await persistAcceptedCursor($, batch);
+    submitFailures = 0;
+    nextSubmitAt = 0;
+    lastSubmitError = "";
+  } catch (error) {
+    lastSubmitError = String(error && error.message ? error.message : error);
+    // A busy turn may refuse a prompt. Keep the batch and retry on later polls,
+    // even if no new mail arrives. Cap backoff so a long turn cannot strand it.
+    if (batch.length > 0) {
+      pending = batch.concat(pending);
+      submitFailures += 1;
+      nextSubmitAt = Date.now() + Math.min(30_000, 3_000 * 2 ** Math.min(submitFailures - 1, 4));
+    }
+  } finally {
+    submitting = false;
+    await invalidate($);
+  }
+}
+
+function scheduleDelivery($) {
+  if (pending.length === 0 || submitting || deliveryScheduled) return;
+  const delay = Math.max(SUBMIT_DEBOUNCE_MS, nextSubmitAt - Date.now());
+  deliveryScheduled = true;
+  $.clock.after(delay, () => {
+    deliveryScheduled = false;
+    void deliver($);
+  });
+}
+
+async function poll($) {
+  if (polling) return;
+  polling = true;
+  polls += 1;
+  try {
+    const base = await baseUrl($);
     if (!(await resolveIdentity($, base))) {
       resolving += 1;
       return;
     }
+    await loadAcceptedCursor($);
     const data = await readJson(
       $,
       `${base}/api/inbox?team=${encodeURIComponent(team)}&name=${encodeURIComponent(agentName)}&since_event_id=${lastEventId}`,
     );
     const messages = Array.isArray(data.messages) ? data.messages : [];
+    const hadPending = pending.length > 0;
     if (messages.length > 0) {
       for (const message of messages) {
         lastEventId = Math.max(lastEventId, Number(message.event_id) || 0);
@@ -200,13 +334,19 @@ async function poll($) {
       }
       // Keep the pane bounded; the inbox tool is the source of truth.
       if (recent.length > 50) recent = recent.slice(-50);
-      await $.ui.invalidate("ui.render").catch(() => {});
-      $.clock.after(SUBMIT_DEBOUNCE_MS, () => {
-        void deliver($, base);
-      });
     }
+    // The MCP cursor advances only when get_inbox is called without an explicit
+    // since_event_id. Suppress those already-read events from plugin notices.
+    const cursor = await readMailboxCursor($, base);
+    const dropped = cursor === null ? 0 : dropConsumedPending(cursor);
+    if (messages.length > 0 || (hadPending && dropped > 0)) await invalidate($);
   } catch (error) {
     lastError = String(error && error.message ? error.message : error);
+  } finally {
+    polling = false;
+    // This is intentionally outside the "new messages" branch. A failed
+    // submit must get another chance even when the server returns no new mail.
+    if (agentId) scheduleDelivery($);
   }
 }
 
@@ -214,9 +354,11 @@ async function poll($) {
 function bandText() {
   if (!agentName) return null;
   const replyNeed = pending.filter((m) => m.need_reply).length;
-  if (pending.length === 0) return `✉ xats · ${agentName}`;
+  if (pending.length === 0) return `✦ xats · ${agentName}`;
   const reply = replyNeed > 0 ? ` · ${replyNeed} need${replyNeed === 1 ? "s" : ""} reply` : "";
-  return `✉ xats · ${pending.length} new${reply}`;
+  // "Pending" means the plugin has not handed the notice to Claude yet. It
+  // does not claim the person has not independently read the MCP inbox.
+  return `✦ xats · ${pending.length} notice${pending.length === 1 ? "" : "s"} pending${reply}`;
 }
 
 export function register(on, options) {
@@ -246,13 +388,11 @@ export function register(on, options) {
     // Register separately and in this order: a rejection of one command (a name
     // that collides, a host that forbids it) must not silently cost us the
     // diagnostic command, which is the only way to see what went wrong.
-    // "xats" can collide with a person's own slash command (seen on a real box:
-    // "/xats" refused because it is the user's). Register a namespaced name
-    // first and treat the short alias as optional.
+    // The user's /xats skill owns the short name; only register namespaced
+    // commands so a harmless collision never obscures delivery errors.
     for (const [name, description] of [
       ["xats-status", "Show xats bus status for this session"],
       ["xats-inbox", "Open the xats inbox"],
-      ["xats", "Open the xats inbox (alias)"],
     ]) {
       try {
         await $.command.register({ name, description, immediate: true });
@@ -340,18 +480,6 @@ export function register(on, options) {
     text: `xats: could not open the inbox (${next.error.kind}).`,
   }));
 
-  on("command.run", { command: "xats" }, async ($) => {
-    if (!agentName) {
-      return {
-        text: `xats: no identity yet (session not registered on the bus).${lastError ? `\nlast error: ${lastError}` : ""}`,
-      };
-    }
-    await $.ui.open({ id: "xats-inbox", title: "xats inbox", closeOnEscape: true });
-    return {};
-  }).catch(async ($, e, next) => ({
-    text: `xats: could not open the inbox (${next.error.kind}).`,
-  }));
-
   on("ui.render", { component: "Pane" }, async ($, e, next) => {
     if (e.requestId !== "xats-inbox") return next(e);
     const { Box, Text, Button } = $.ui.resolve(e);
@@ -361,14 +489,18 @@ export function register(on, options) {
       flexDirection: "row",
       columnGap: 2,
       children: [
-        Text({ children: [`✉ xats · ${agentName}`], bold: true }),
-        Text({ children: [`${recent.length} shown · ${pending.length} new`], dimColor: true }),
+        Text({ children: [`✦ xats · ${agentName}`], bold: true }),
+        Text({ children: [`${recent.length} shown · ${pending.length} pending notices`], dimColor: true }),
         Button({
           key: "clear",
-          label: "Clear",
+          label: "Dismiss",
           plain: true,
           onPress: () => {
+            // Explicit human dismissal also clears a notice left pending after
+            // the person read its body via MCP. No implicit read cursor is
+            // available to the mod without consuming mail on the server.
             recent = [];
+            pending = [];
             redraw();
           },
         }),
@@ -407,10 +539,16 @@ export function register(on, options) {
       `  identity: ${agentName ? `${agentName} (${agentId})` : "unregistered"}`,
       `  session:  ${await sessionIDOf($)}`,
       `  agents:   ${lastAgentsSeen}`,
-      `  cursor:   ${lastEventId}`,
+      `  cursor:   fetched ${lastEventId} · accepted ${acceptedEventId}`,
+      `  cursor file: ${cursorPath || "unavailable"}`,
+      `  cursor error: ${cursorError || "none"}`,
+      `  mailbox:  ${mailboxCursor ?? "unavailable"}${mailboxCursorError ? ` · ${mailboxCursorError}` : ""}`,
       `  pending:  ${pending.length}`,
       `  polls:    ${polls}`,
-      `  error:    ${lastError || "none"}`,
+      `  submit:   ${submitOk}/${submitAttempts} ok, ${submitFailures} consecutive failures`,
+      `  retry:    ${nextSubmitAt ? `${Math.max(0, nextSubmitAt - Date.now())}ms` : "none"}`,
+      `  submit error: ${lastSubmitError || "none"}`,
+      `  other error:  ${lastError || "none"}`,
     ].join("\n"),
   })).catch(async ($, e, next) => ({
     text: `xats status failed (${next.error.kind}): ${lastError || "no detail"}`,
@@ -430,8 +568,17 @@ export const __internals = {
     agentName,
     team,
     lastEventId,
+    acceptedEventId,
+    cursorPath,
+    cursorError,
+    mailboxCursor,
+    mailboxCursorError,
     pending: pending.length,
     recent: recent.length,
+    submitAttempts,
+    submitOk,
+    submitFailures,
+    lastSubmitError,
     lastError,
   }),
   setTeam(value) {
@@ -444,7 +591,21 @@ export const __internals = {
     agentName = null;
     team = "default";
     lastEventId = 0;
+    acceptedEventId = 0;
+    cursorLoaded = false;
+    cursorPath = "";
+    cursorError = "";
+    mailboxCursor = null;
+    mailboxCursorError = "";
+    lastSessionID = "";
     submitting = false;
+    polling = false;
+    deliveryScheduled = false;
+    nextSubmitAt = 0;
+    submitFailures = 0;
+    submitAttempts = 0;
+    submitOk = 0;
+    lastSubmitError = "";
     resolving = 0;
     lastError = "";
     polls = 0;

@@ -1,4 +1,4 @@
-# Stage 1: Secure xats peer networking
+# Stage 1: Direct peer networking for Cross-Agent Teams
 
 ## Goal and boundary
 
@@ -17,7 +17,7 @@ mDNS/DNS-SD discovers candidates only on multicast-reachable segments. It is not
 
 ### Operator workflow
 
-Install the `peer` component with the normal installer or `npx xats-setup --only=peer`. Installation only copies the isolated runtime and installs pinned dependencies; it does not open a listener. The local xats daemon must also be installed and running for agent roster/message federation; the default full install includes it. Use `xats-setup peer run` for a foreground session, or explicitly `xats-setup peer enable` to install and start a user service now and at login. `peer status`, `peer candidates`, `peer pending`, `peer peers`, and `peer revoke <device-id>` show the current state and manage trust.
+Install the `peer` component with the normal installer or `npx xats-setup --only=peer`. Installation only copies the isolated runtime and installs pinned dependencies; it does not open a listener. The local xats daemon must also be installed and running for agent roster/message federation; the default full install includes it. Use `xats-setup peer run` for a foreground session, or explicitly `xats-setup peer enable` to install and start a user service now and at login. `peer status`, `peer candidates`, `peer pending`, `peer peers`, and `peer revoke <device-id>` show the current state and manage trust. Saved `shared` and `open` approval policy values are not enforced: the current runtime requires manual approval for every new peer.
 
 For LAN pairing, run `xats-setup peer pair <candidate-device-id>` on one instance, then inspect and approve the pending request on the other with `xats-setup peer approve <pending-id> --label <name>` (or deny it). For routed direct connectivity, create a short-lived invite with `xats-setup peer invite --endpoint https://<reachable-address>:<port> --out <private-file>` and accept it with `xats-setup peer pair --invite-file <private-file> --endpoint https://<joining-address>:<port>`. The invite file is a secret and should be deleted after use. Both listener addresses must be reachable directly; the service never scans ports or changes daemon binding.
 
@@ -29,7 +29,7 @@ For LAN pairing, run `xats-setup peer pair <candidate-device-id>` on one instanc
 - A pair request includes the invite id, a fresh 128-bit nonce, requester device id/public key, requester TLS fingerprint, an Ed25519 signature over canonical request fields, and HMAC-SHA-256 over those fields keyed by the invite secret. For LAN candidate pairing without a pre-shared invite, the candidate may request pairing without the HMAC, but still proves possession of its Ed25519 private key; the remote user must approve.
 - A valid request creates only a pending candidate. Approval is the only operation that writes a peer into the trust store. Rejecting/denying consumes the related invite. Duplicate nonces, expired invites, malformed keys, mismatched device ids, and replayed request ids are rejected.
 - After pairing, each network request is sent over TLS pinned to the peer certificate and carries a signature by the paired Ed25519 key over method, versioned path, timestamp, nonce/request id, and body hash. Enforce a bounded timestamp window and replay cache. Message IDs are idempotent across retries.
-- Each peer has identity-bound authorization; pair-request attempts are rate-limited per source address, and request bodies are size-bounded. There is no shared fleet-wide bearer token. Revocation immediately removes that peer's authorization and reconnect state.
+- Each paired peer request is authenticated by its Ed25519 identity; pair-request attempts are rate-limited per source address, and request bodies are size-bounded. There is no shared fleet-wide bearer token. Revocation removes local trust and reconnect state, so subsequent requests from that peer are rejected by this instance. It is not a permanent global denylist; a new pairing can be explicitly approved later.
 
 ## Versioned network surface
 
@@ -51,7 +51,7 @@ Malformed/oversized input, unsupported versions, unknown peer keys, stale timest
 
 ## Existing implementation mapping
 
-- `assets/daemon/cli.js` owns the local bus and remains loopback-bound. Its local-only `GET /api/agents/all` route exposes a sanitized all-team roster to the peer runtime; the daemon's network API is never exposed.
+- `daemon/src` is the owned local daemon source and is bundled by `npm run build:daemon`. It remains loopback-bound. Its local-only `GET /api/agents/all` route exposes a sanitized all-team roster to the peer runtime; the daemon's network API is never exposed.
 - `assets/bridge/bridge.mjs` remains the separate Filament bridge. Stage 1 does not change its bind address or reuse its plain-HTTP peer endpoints.
 - `lib/peer-identity.mjs`, `lib/peer-pairing.mjs`, and `lib/peer-tls.mjs` implement Ed25519 identity, expiring signed invites bound to an HTTPS endpoint/certificate, one-use pairing proofs, explicit approve/deny/revoke state, pinned TLS identities, and owner-only persistence.
 - `lib/peer-transport.mjs` is the isolated HTTPS peer listener/client with signed requests, TLS pin verification, replay protection, request limits, and authenticated roster/message handlers.
@@ -61,7 +61,7 @@ Malformed/oversized input, unsupported versions, unknown peer keys, stale timest
 
 ## Reproducible network-flow checks
 
-Run these commands from a repository checkout after `npm install`; the E2E daemon is launched from the bundled patched asset, not a user-installed daemon. The automated `npm test` suite includes CLI-handler flows invoking `mainPeer` with the same arguments as `xats-setup peer`: `test/peer-discovery-flow.test.mjs` injects candidate-only mDNS records, then pairs and approves over a non-loopback interface using real pinned-HTTPS requests (including fallback from a dead advertised address); `test/peer-federation.test.mjs` creates and accepts a short-lived invite over a non-loopback interface, then verifies roster/message exchange, reconnect, deduplication, and revocation. `test/real-daemon-cli-e2e.test.mjs` additionally launches two real daemon processes from the bundled patched asset using the pinned test-only `cross-agent-teams-mcp@0.7.4` devDependency, drives the invite/approval CLI flow, and verifies delivery between their actual local daemon APIs. On Linux with root network-namespace privileges, `test/routed-peer-namespace-e2e.test.mjs` further places those processes in separate peer namespaces on distinct IP subnets and routes their invite and message traffic through a third forwarding namespace; it skips where namespace privileges are unavailable.
+Run these commands from a repository checkout after `npm install`; the E2E daemon is launched from the owned build in `daemon/src`, not a separately installed user's daemon. The automated `npm test` suite includes CLI-handler flows invoking `mainPeer` with the same arguments as `xats-setup peer`: `test/peer-discovery-flow.test.mjs` injects candidate-only mDNS records, then pairs and approves over a non-loopback interface using real pinned-HTTPS requests (including fallback from a dead advertised address); `test/peer-federation.test.mjs` creates and accepts a short-lived invite over a non-loopback interface, then verifies roster/message exchange, reconnect, deduplication, and revocation. `test/real-daemon-cli-e2e.test.mjs` additionally launches two real daemon processes from the bundled patched asset using the pinned test-only `cross-agent-teams-mcp@0.7.4` devDependency, drives the invite/approval CLI flow, and verifies delivery between their actual local daemon APIs. On Linux with root network-namespace privileges, `test/routed-peer-namespace-e2e.test.mjs` further places those processes in separate peer namespaces on distinct IP subnets and routes their invite and message traffic through a third forwarding namespace; it skips where namespace privileges are unavailable.
 
 The routed namespace test can also be run directly on Linux as root with `CAP_NET_ADMIN`:
 
@@ -126,8 +126,8 @@ The script runs the bundled patched daemon asset and its pinned test-only depend
 2. **Complete:** implement the dedicated HTTPS peer service and loopback-only control interface; paired requests require signatures and pinned TLS.
 3. **Complete:** install and run candidate-only mDNS, invite create/accept, explicit approval, peer list/status/revoke; malformed and duplicate discovery records are covered by tests.
 4. **Complete:** federate sanitized rosters and agent messages over paired transport; test duplicate/replay handling, disconnect/reconnect, and revocation across two peer runtimes and a real local daemon.
-5. **Complete:** keep peer service opt-in; integrate cross-platform service enable/start/stop/disable, update restart, reset, shadow cleanup, and user docs. Verified with `npm test` (45 passing on this Linux host, including a routed network-namespace E2E that proves L3 transit through a forwarding router), `npm pack --dry-run`, the live mDNS-to-CLI pairing smoke, and automated real-daemon CLI invite/explicit-approval delivery without Filament/Tunlion. A physical two-host run uses the documented two-machine check above.
+5. **Complete:** keep the peer service opt-in; integrate cross-platform service enable/start/stop/disable, update restart, reset, shadow cleanup, and user docs. Automated pairing, pinned-HTTPS federation, real-daemon CLI, and routed-network-namespace tests exercise these flows. Test results are not evidence of a physical two-host or general Internet-federation deployment; use the documented two-machine procedure for that separate live check.
 
 ## Stage boundaries
 
-Stage 1 covers direct IP reachability only. It must not depend on Filament/Tunlion. Stage 2 may add Filament/Tunlion for paths where direct connections are unavailable, without weakening Stage 1 identity, approval, encryption, or revocation guarantees.
+Stage 1 covers direct IP reachability only. It must not depend on Filament/Tunlion. Stage 2 may add Filament/Tunlion for paths where direct connections are unavailable. Signed per-message envelopes, recipient-sealed relays, and durable revocation tombstones are not current Stage 1 guarantees.

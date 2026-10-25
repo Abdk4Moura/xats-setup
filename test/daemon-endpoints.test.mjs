@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 // Endpoint coverage for the daemon we own (daemon/src, built to daemon/dist).
 //
 // This exists because the vendored bundle once shipped MORE REST endpoints than
-// the source it claimed to come from (8 vs 3), and nothing noticed until a
+// the source it claimed to come from, and nothing noticed until a
 // feature silently depended on one of the extras (/api/agents/all). A build that
 // drops a route must fail here, not in an adapter three layers away.
 
@@ -132,6 +132,10 @@ test('every REST endpoint the adapters rely on exists and answers', { timeout: 9
     calls.heartbeat = (await post(base, '/api/heartbeat', { agent_id: registered.agent_id })).status
     calls.whoami = (await post(base, '/api/whoami', { agent_id: registered.agent_id })).status
     calls.inbox = (await get(base, '/api/inbox?team=default&name=endpoint-probe&since_event_id=0')).status
+    const cursorResponse = await get(base, `/api/cursor?agent_id=${encodeURIComponent(registered.agent_id)}`)
+    calls.cursor = cursorResponse.status
+    const cursor = await cursorResponse.json()
+    assert.equal(cursor.last_processed_event_id, 0)
     calls.send = (
       await post(base, '/api/send', {
         from: { team: 'default', name: 'endpoint-probe' },
@@ -139,6 +143,8 @@ test('every REST endpoint the adapters rely on exists and answers', { timeout: 9
         body: 'self-send',
       })
     ).status
+    const cursorAfterRead = await (await get(base, `/api/cursor?agent_id=${encodeURIComponent(registered.agent_id)}`)).json()
+    assert.equal(cursorAfterRead.last_processed_event_id, 0, 'explicit /api/inbox and /api/cursor must not advance the MCP cursor')
     calls.deregister = (await post(base, '/api/deregister', { agent_id: registered.agent_id })).status
 
     return calls

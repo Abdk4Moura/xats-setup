@@ -11,6 +11,7 @@ import type { SseFanout, SseSink } from '../daemon/sse-fanout.js'
 import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
 import type { DaemonContext } from '../daemon/server.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
+import type { ClaudeBindCapabilities } from './claude-bind.js'
 
 interface Session {
   transport: StreamableHTTPServerTransport
@@ -24,6 +25,8 @@ interface Session {
     version?: string
   }
   originInfo: SessionOriginInfo
+  capabilityBoundAgentId?: string
+  bindAgent: (agentId: string, team: string) => void
 }
 
 export interface OrphanSessionGcOptions {
@@ -58,6 +61,7 @@ export function mountMcp(
     log?: (line: string) => void
     context?: DaemonContext
     orphanSessionLimit?: number
+    claudeBind?: ClaudeBindCapabilities
   } = {}
 ): MountMcpResult {
   const sessions = new Map<string, Session>()
@@ -187,6 +191,7 @@ export function mountMcp(
           server,
           sessionId: sid,
           agentIdHolder,
+          bindAgent: onRegisterSuccess,
           createdAt: now,
           lastActivityAt: now,
           clientInfo: undefined,
@@ -206,6 +211,8 @@ export function mountMcp(
         try { channelWakeFanout.detachBySession(transport.sessionId) } catch { /* ignore */ }
       }
       if (transport.sessionId) {
+        const capId = sessions.get(transport.sessionId)?.capabilityBoundAgentId
+        if (capId) opts.claudeBind?.release(capId, transport.sessionId)
         // Release this session's identity binding from the daemon-singleton
         // RegisterAgentService so its `connections` Map does not retain dead
         // (device, team, name) → connection_id entries. Without this, every reconnect
@@ -248,6 +255,7 @@ export function mountMcp(
       server,
       sessionId: '',
       agentIdHolder,
+      bindAgent: onRegisterSuccess,
       createdAt: now,
       lastActivityAt: now,
       originInfo: { origin: 'local', remote_addr: null },
@@ -277,6 +285,46 @@ export function mountMcp(
     if (!session && !isInit) {
       log(`mcp unknown_session: route=POST method=${body?.method ?? 'unknown'} name=${body?.params?.name ?? 'none'} sid=${sid ?? 'none'} sessions=${sessions.size}`)
       return sendControlPlaneReject(reply, 404)
+    }
+
+    // The private per-Claude-session capability is added by Claude Code's
+    // PreToolUse hook to the MODEL'S OWN tools/call, not a second MCP client.
+    // Strip it BEFORE the MCP SDK validates strict per-tool argument schemas.
+    // Never select an agent by name, PID, or recent activity. An invalid token
+    // from an unbound caller is rejected; no token preserves unknown_agent.
+    if (session && body?.method === 'tools/call') {
+      const args = body.params?.arguments
+      const hasToken = args && Object.prototype.hasOwnProperty.call(args, 'xats_bind_token')
+      if (hasToken) {
+        const token = args!.xats_bind_token
+        delete args!.xats_bind_token
+        if (!opts.claudeBind || originInfo.origin !== 'local') return sendControlPlaneReject(reply, 403)
+        if (session.capabilityBoundAgentId) {
+          if (!opts.claudeBind.owns(session.capabilityBoundAgentId, session.sessionId)) {
+            return sendControlPlaneReject(reply, 403)
+          }
+          // Even a bound session may not present a different session's token.
+          const binding = opts.claudeBind.bind(token, session.sessionId, session.capabilityBoundAgentId)
+          if (!binding) {
+            return sendControlPlaneReject(reply, 403)
+          }
+        } else if (session.agentIdHolder.current) {
+          return sendControlPlaneReject(reply, 403)
+        } else {
+          const binding = opts.claudeBind.bind(token, session.sessionId)
+          if (!binding) return sendControlPlaneReject(reply, 403)
+          session.bindAgent(binding.agentId, binding.team)
+          session.capabilityBoundAgentId = binding.agentId
+        }
+      } else if (session.capabilityBoundAgentId &&
+                 !opts.claudeBind?.owns(session.capabilityBoundAgentId, session.sessionId)) {
+        return sendControlPlaneReject(reply, 403)
+      }
+      // Manual register_agent cannot move a capability-bound session into
+      // another Claude identity or team.
+      if (session.capabilityBoundAgentId && body.params?.name === 'register_agent') {
+        return sendControlPlaneReject(reply, 403)
+      }
     }
 
     // register_agent presenting a different Authorization header than the one that

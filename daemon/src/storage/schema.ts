@@ -32,11 +32,20 @@ const DDL = [
     runtime_bound_at TEXT,
     channel_session_id TEXT,
     session_key TEXT,
+    offline_since TEXT,
     delivery_kind TEXT NOT NULL DEFAULT 'none',
     delivery_payload TEXT,
     remote_addr TEXT
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS agents_identity_idx ON agents(device, team, name)`,
+  `CREATE TABLE IF NOT EXISTS claude_bind_capabilities (
+    token_hash TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+    session_key TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    revoked_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_claude_bind_capabilities_agent_id ON claude_bind_capabilities(agent_id)`,
   `CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     event_id INTEGER NOT NULL REFERENCES events(event_id),
@@ -101,6 +110,7 @@ function migrateAgentsDeliveryColumns(db: Database.Database): void {
   const needKind = !existing.has('delivery_kind')
   const needPayload = !existing.has('delivery_payload')
   const needSessionKey = !existing.has('session_key')
+  const needOfflineSince = !existing.has('offline_since')
   const needRuntimeUiPid = !existing.has('runtime_ui_pid')
   const needRuntimeTty = !existing.has('runtime_tty')
   const needRuntimeVerificationMode = !existing.has('runtime_verification_mode')
@@ -112,6 +122,7 @@ function migrateAgentsDeliveryColumns(db: Database.Database): void {
     !needKind &&
     !needPayload &&
     !needSessionKey &&
+    !needOfflineSince &&
     !needRuntimeUiPid &&
     !needRuntimeTty &&
     !needRuntimeVerificationMode &&
@@ -133,6 +144,9 @@ function migrateAgentsDeliveryColumns(db: Database.Database): void {
     }
     if (needSessionKey) {
       db.exec(`ALTER TABLE agents ADD COLUMN session_key TEXT`)
+    }
+    if (needOfflineSince) {
+      db.exec(`ALTER TABLE agents ADD COLUMN offline_since TEXT`)
     }
     if (needRuntimeUiPid) {
       db.exec(`ALTER TABLE agents ADD COLUMN runtime_ui_pid INTEGER`)

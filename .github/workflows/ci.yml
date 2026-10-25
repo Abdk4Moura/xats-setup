@@ -4,10 +4,12 @@
 # contends with a shared worker lease, and it is the only practical way to cover
 # macOS — which had zero verification before this workflow existed.
 #
-# Two jobs:
+# Four jobs:
 #   test          - the suite on Linux/macOS/Windows x Node 22 and 24
 #   install-smoke - the installer, in a sandboxed HOME, so it cannot touch the
 #                   runner's real home or install a service
+#   test-daemon   - tests that need the daemon's native runtime dependencies
+#   daemon        - build, endpoint parity, and demo checks on Linux/macOS/Windows
 name: ci
 
 on:
@@ -186,7 +188,7 @@ jobs:
 
   # The daemon is our source now (daemon/src). Build it and prove the endpoint
   # set the adapters depend on, so a build can never silently drop a route the
-  # way the vendored bundle did (it shipped 8 routes while its map described 3).
+  # way the old vendored bundle did (its route set did not match its source).
   daemon:
     name: daemon build + endpoints (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -207,10 +209,10 @@ jobs:
       - name: Assert the build contains every intended endpoint
         shell: bash
         run: |
-          # The intended set is 8, not the 9 the old vendored bundle served:
+          # The intended set includes the read-only /api/cursor endpoint.
           # /api/events (SSE) was removed on purpose and the pi adapter polls.
           missing=0
-          for route in api/send api/inbox api/agents api/agents/all api/register api/deregister api/heartbeat api/whoami; do
+          for route in api/send api/inbox api/cursor api/agents api/agents/all api/register api/deregister api/heartbeat api/whoami; do
             grep -q "$route" daemon/dist/cli.js || { echo "::error::daemon build is missing $route"; missing=1; }
           done
           exit $missing
@@ -221,9 +223,9 @@ jobs:
           #  - a route in source but missing from the build = a build regression
           #  - a route in the build but not in source = a stale route surviving a
           #    source deletion, which a one-way check would happily pass
-          # The expected set is 8: /api/events (SSE) was removed deliberately and
-          # is documented as a breaking change in daemon/CHANGELOG.md.
-          expected=$(printf '%s\n' api/agents api/agents/all api/deregister api/heartbeat api/inbox api/register api/send api/whoami | sort)
+          # The expected set is 9, including read-only /api/cursor. /api/events
+          # (SSE) was removed deliberately and is documented as a breaking change.
+          expected=$(printf '%s\n' api/agents api/agents/all api/cursor api/deregister api/heartbeat api/inbox api/register api/send api/whoami | sort)
           src=$(grep -oE "'/api/[a-z_/]+'" daemon/src/daemon/rest-api.ts | tr -d "'" | sed 's|^/||' | sort -u)
           dist=$(grep -oE "api/[a-z_/]+" daemon/dist/cli.js | sort -u)
           echo "--- expected ---"; echo "$expected"
@@ -231,7 +233,7 @@ jobs:
           echo "--- build ---";    echo "$dist"
           if [ "$src" != "$expected" ]; then echo "::error::source route set differs from the intended set"; exit 1; fi
           if [ "$dist" != "$expected" ]; then echo "::error::build route set differs from the intended set"; exit 1; fi
-          echo "route sets match exactly (8)"
+          echo "route sets match exactly (9)"
       - name: Demo (two agents, one message, end to end)
         shell: bash
         env:

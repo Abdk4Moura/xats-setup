@@ -200,7 +200,7 @@ export default Plugin.define({
         return (
           <Show when={entry && entry.unread > 0}>
             <text fg={context.theme.text.muted}>
-              {`✉ ${entry!.unread}`}
+              {`✦ ${entry!.unread}`}
               {entry!.needsReply > 0 ? ` · ${entry!.needsReply} reply` : ""}
             </text>
           </Show>
@@ -215,7 +215,7 @@ export default Plugin.define({
         return (
           <Show when={panel.name === "xats.inbox"}>
             <box flexDirection="column" gap={1}>
-              <text fg={context.theme.text.base}>{entry ? `✉ xats · ${entry.name}` : "✉ xats"}</text>
+              <text fg={context.theme.text.base}>{entry ? `✦ xats · ${entry.name}` : "✦ xats"}</text>
               <Show
                 when={entry && entry.messages.length > 0}
                 fallback={<text fg={context.theme.text.muted}>No messages.</text>}

@@ -13,6 +13,7 @@ import { wrapStorage } from './errors.js'
 import type { ChannelWakeFanout } from './channel-wake-fanout.js'
 import type { SessionOriginInfo } from './network-origin.js'
 import type { DaemonContext } from './server.js'
+import type { ClaudeBindCapabilities } from '../mcp/claude-bind.js'
 
 // Loopback-only, sessionless REST lifeboat. It reuses the SAME service layer as
 // the MCP tools (SendMessageService / GetInboxService / listAgentsForTeam) and
@@ -23,6 +24,7 @@ import type { DaemonContext } from './server.js'
 export interface RestApiDeps {
   channelWakeFanout?: ChannelWakeFanout
   context?: DaemonContext
+  claudeBind?: ClaudeBindCapabilities
 }
 
 interface RestCtx {
@@ -31,6 +33,7 @@ interface RestCtx {
   agents: AgentsRepo
   sendSvc: SendMessageService
   inboxSvc: GetInboxService
+  claudeBind?: ClaudeBindCapabilities
 }
 
 const identitySchema = z.object({
@@ -145,6 +148,19 @@ async function handleInbox(ctx: RestCtx, req: FastifyRequest, reply: FastifyRepl
   return reply.send(result)
 }
 
+async function handleCursor(ctx: RestCtx, req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  const parsed = identityQuerySchema.safeParse(req.query)
+  if (!parsed.success) {
+    return reply.code(400).send({
+      error: 'invalid_request',
+      detail: parsed.error.issues.map(i => i.message).join('; '),
+    })
+  }
+  const last_processed_event_id = ctx.agents.getLastProcessedEventId(parsed.data.agent_id)
+  if (last_processed_event_id === undefined) return reply.code(404).send({ error: 'unknown_agent' })
+  return reply.send({ last_processed_event_id })
+}
+
 async function handleAgents(ctx: RestCtx, req: FastifyRequest, reply: FastifyReply): Promise<void> {
   const query = req.query as Record<string, unknown>
   const team = typeof query.team === 'string' ? query.team : undefined
@@ -168,11 +184,14 @@ const registerBodySchema = z.object({
   model: z.string().optional(),
   name_mode: z.enum(['prefer', 'exact']).optional(),
   session_key: z.string().min(1).optional(),
+  bind_mcp: z.boolean().optional(),
   delivery: z.unknown().optional(),
 }).strict()
 
 const deregisterBodySchema = z.object({
   agent_id: z.string().min(1),
+  session_key: z.string().min(1).optional(),
+  retain_mailbox: z.boolean().optional(),
 }).strict()
 
 const heartbeatBodySchema = z.object({
@@ -200,6 +219,9 @@ async function handleRegister(ctx: RestCtx, req: FastifyRequest, reply: FastifyR
     })
   }
   const data = parsed.data
+  if (data.bind_mcp && (data.agent_type !== 'claude-code' || !data.session_key || !ctx.claudeBind)) {
+    return reply.code(400).send({ error: 'claude_bind_requires_session_key' })
+  }
 
   const validName = validateNameLabel(data.name)
   if ('error' in validName) return reply.code(400).send({ error: validName.error })
@@ -248,6 +270,10 @@ async function handleRegister(ctx: RestCtx, req: FastifyRequest, reply: FastifyR
     }
     throw error
   }
+  if (data.bind_mcp) {
+    const bind_token = ctx.claudeBind!.issue(result.agent_id, data.session_key!)
+    return reply.send({ ...result, bind_token })
+  }
   return reply.send(result)
 }
 
@@ -260,8 +286,16 @@ async function handleDeregister(ctx: RestCtx, req: FastifyRequest, reply: Fastif
     })
   }
   const data = parsed.data
+  if (data.retain_mailbox) {
+    if (!data.session_key) return reply.code(400).send({ error: 'session_key_required' })
+    const marked = ctx.agents.markClaudeSessionOffline(data.agent_id, data.session_key)
+    if (!marked) return reply.code(404).send({ error: 'unknown_agent' })
+    ctx.claudeBind?.revoke(data.agent_id)
+    return reply.send({ ok: true })
+  }
   const deleted = ctx.agents.deleteById(data.agent_id)
   if (!deleted) return reply.code(404).send({ error: 'unknown_agent' })
+  ctx.claudeBind?.revoke(data.agent_id)
   return reply.send({ ok: true })
 }
 
@@ -320,7 +354,7 @@ export function mountRestApi(
   const autoPokeImpl = createAutoPokeImpl(db, agents, deps.channelWakeFanout)
   const sendSvc = new SendMessageService(db, agents, events, { poke: autoPokeImpl })
   const inboxSvc = new GetInboxService(db, agents)
-  const ctx: RestCtx = { db, localDevice, agents, sendSvc, inboxSvc }
+  const ctx: RestCtx = { db, localDevice, agents, sendSvc, inboxSvc, claudeBind: deps.claudeBind }
 
   // Loopback gate for every /api/* route. Runs after the global token-auth and
   // origin-classification onRequest hooks registered in buildServer, so the order
@@ -329,6 +363,7 @@ export function mountRestApi(
   app.addHook('onRequest', restLoopbackGate)
   app.post('/api/send', (req, reply) => handleSend(ctx, req, reply))
   app.get('/api/inbox', (req, reply) => handleInbox(ctx, req, reply))
+  app.get('/api/cursor', (req, reply) => handleCursor(ctx, req, reply))
   app.get('/api/agents', (req, reply) => handleAgents(ctx, req, reply))
   // Cross-team roster: used by peer federation to advertise what this bus has.
   app.get('/api/agents/all', (_req, reply) => {

@@ -74,6 +74,7 @@ type DbAgentRow = {
   tmux_pane_id: string | null
   runtime_ui_pid: number | null
   last_seen_at: string
+  offline_since: string | null
 } & DeliveryRow
 
 export function isAgentLive(
@@ -159,36 +160,44 @@ export class AgentsRepo {
     const findRow = (candidate: string) =>
       this.db
         .prepare(
-          `SELECT agent_id, session_key, name, last_seen_at FROM agents WHERE device=? AND team=? AND name=?`
+          `SELECT agent_id, agent_type, session_key, name, last_seen_at FROM agents WHERE device=? AND team=? AND name=?`
         )
         .get(device, team, candidate) as
-        | { agent_id: string; session_key: string | null; name: string; last_seen_at: string }
+        | { agent_id: string; agent_type: AgentType | null; session_key: string | null; name: string; last_seen_at: string }
         | undefined
 
     let existing = findRow(requestedName)
     // Prefer mode with a known session: if this session already owns an identity,
     // keep it even when the computed default differs, so a claimed name survives
     // a resume without a client-side binding file.
-    if (mode === 'prefer' && sessionKey !== null) {
-      const owned = this.db
-        .prepare(`SELECT name FROM agents WHERE device=? AND team=? AND session_key=?`)
-        .get(device, team, sessionKey) as { name: string } | undefined
+    if (sessionKey !== null) {
+      const owned = input.agent_type === 'claude-code'
+        ? this.db.prepare(
+            `SELECT name FROM agents WHERE device=? AND team=? AND session_key=? AND agent_type='claude-code'`
+          ).get(device, team, sessionKey) as { name: string } | undefined
+        : mode === 'prefer'
+          ? this.db.prepare(`SELECT name FROM agents WHERE device=? AND team=? AND session_key=?`)
+            .get(device, team, sessionKey) as { name: string } | undefined
+          : undefined
       if (owned && owned.name !== requestedName) {
         name = owned.name
         existing = findRow(name)
       }
     }
     if (existing) {
-      const sameSession = sessionKey !== null && existing.session_key === sessionKey
+      const sameSession = sessionKey !== null && existing.session_key === sessionKey &&
+        (existing.agent_type !== 'claude-code' || input.agent_type === 'claude-code')
       const live = isAgentLive({ last_seen_at: existing.last_seen_at }, { ttlMs })
-      const wantsDistinct = sessionKey !== null || mode === 'exact'
-      if (wantsDistinct && !sameSession && live) {
+      // A retained Claude mailbox cannot be taken over when its name ages out.
+      const retainedClaude = existing.agent_type === 'claude-code' && existing.session_key !== null
+      const wantsDistinct = sessionKey !== null || mode === 'exact' || retainedClaude
+      if (wantsDistinct && !sameSession && (live || retainedClaude)) {
         if (mode === 'exact') {
           const conflict = new Error('name_taken') as Error & { code?: string }
           conflict.code = 'name_taken'
           throw conflict
         }
-        name = this.allocateName(device, team, requestedName, sessionKey, ttlMs, findRow)
+        name = this.allocateName(device, team, requestedName, sessionKey, input.agent_type, ttlMs, findRow)
       }
     }
 
@@ -232,15 +241,19 @@ export class AgentsRepo {
     team: string,
     base: string,
     sessionKey: string | null,
+    agentType: AgentType | undefined,
     ttlMs: number,
-    findRow: (candidate: string) => { session_key: string | null; last_seen_at: string } | undefined
+    findRow: (candidate: string) => { agent_type: AgentType | null; session_key: string | null; last_seen_at: string } | undefined
   ): string {
     for (let i = 2; i <= 50; i += 1) {
       const candidate = `${base}-${i}`
       const row = findRow(candidate)
       if (!row) return candidate
-      const sameSession = sessionKey !== null && row.session_key === sessionKey
-      if (sameSession || !isAgentLive({ last_seen_at: row.last_seen_at }, { ttlMs })) return candidate
+      const sameSession = sessionKey !== null && row.session_key === sessionKey &&
+        (row.agent_type !== 'claude-code' || agentType === 'claude-code')
+      if (sameSession) return candidate
+      if (row.agent_type === 'claude-code' && row.session_key !== null) continue
+      if (!isAgentLive({ last_seen_at: row.last_seen_at }, { ttlMs })) return candidate
     }
     return `${base}-${randomUUID().slice(0, 8)}`
   }
@@ -278,6 +291,10 @@ export class AgentsRepo {
          model = excluded.model,
          session_key = COALESCE(excluded.session_key, session_key),
          last_seen_at = excluded.last_seen_at,
+         offline_since = CASE
+           WHEN excluded.agent_type = 'claude-code' AND excluded.session_key IS NOT NULL THEN NULL
+           ELSE offline_since
+         END,
          tmux_pane_id = COALESCE(excluded.tmux_pane_id, tmux_pane_id),
          claude_ui_pid = COALESCE(excluded.claude_ui_pid, claude_ui_pid),
          runtime_ui_pid = COALESCE(excluded.runtime_ui_pid, runtime_ui_pid),
@@ -404,7 +421,8 @@ export class AgentsRepo {
          runtime_ui_pid,
          delivery_kind,
          delivery_payload,
-         last_seen_at
+         last_seen_at,
+         offline_since
        FROM agents
        WHERE team=?`
     const orderBy = ` ORDER BY registered_at ASC`
@@ -421,7 +439,7 @@ export class AgentsRepo {
       const agent = toAgentRow(row)
       return {
         ...agent,
-        online: isAgentLive(agent, { ttlMs }),
+        online: row.offline_since === null && isAgentLive(agent, { ttlMs }),
       }
     })
   }
@@ -430,11 +448,38 @@ export class AgentsRepo {
     this.db.prepare(`UPDATE agents SET last_seen_at=? WHERE agent_id=?`).run(new Date().toISOString(), agent_id)
   }
 
+  /** Retain Claude keyed mailboxes; mark their first TTL expiry as offline. */
   deleteOlderThan(threshold: string): number {
+    return this.db.transaction(() => {
+      this.db.prepare(
+        `UPDATE agents SET offline_since = ?
+         WHERE last_seen_at < ? AND agent_type = 'claude-code'
+           AND session_key IS NOT NULL AND offline_since IS NULL`
+      ).run(new Date().toISOString(), threshold)
+      // TTL expiry also revokes the bearer capability. A later resume issues
+      // a fresh one, while the offline mailbox row and agent_id remain intact.
+      this.db.prepare(
+        `DELETE FROM claude_bind_capabilities
+         WHERE agent_id IN (SELECT agent_id FROM agents
+                            WHERE agent_type='claude-code' AND session_key IS NOT NULL
+                              AND offline_since IS NOT NULL AND last_seen_at < ?)`
+      ).run(threshold)
+      const result = this.db.prepare(
+        `DELETE FROM agents WHERE last_seen_at < ?
+         AND (agent_type IS NOT 'claude-code' OR session_key IS NULL)`
+      ).run(threshold)
+      return result.changes
+    })()
+  }
+
+  /** A session_end can only off-line the matching Claude session, never another agent. */
+  markClaudeSessionOffline(agentId: string, sessionKey: string): boolean {
     const result = this.db.prepare(
-      `DELETE FROM agents WHERE last_seen_at < ?`
-    ).run(threshold)
-    return result.changes
+      `UPDATE agents SET offline_since = COALESCE(offline_since, ?)
+       WHERE agent_id = ? AND agent_type = 'claude-code' AND session_key = ?
+         AND session_key IS NOT NULL`
+    ).run(new Date().toISOString(), agentId, sessionKey)
+    return result.changes === 1
   }
 
   deleteById(agent_id: string): boolean {
@@ -456,11 +501,13 @@ export class AgentsRepo {
          role,
          name,
          model,
+         session_key,
          tmux_pane_id,
          runtime_ui_pid,
          delivery_kind,
          delivery_payload,
-         last_seen_at
+         last_seen_at,
+         offline_since
        FROM agents
        WHERE agent_id=?`
     ).get(agent_id) as DbAgentRow | undefined
@@ -470,5 +517,13 @@ export class AgentsRepo {
 
   findById(agent_id: string): AgentRow | undefined {
     return this.getById(agent_id)
+  }
+
+  /** Read the MCP inbox cursor without advancing it. */
+  getLastProcessedEventId(agent_id: string): number | undefined {
+    const row = this.db.prepare(
+      `SELECT last_processed_event_id FROM agents WHERE agent_id=?`
+    ).get(agent_id) as { last_processed_event_id: number } | undefined
+    return row?.last_processed_event_id
   }
 }

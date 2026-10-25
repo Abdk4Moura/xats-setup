@@ -1,84 +1,52 @@
 # Launch checklist
 
-Status of the "ship it" blockers. Keep this current; it is the thing we consult
-before any public post.
+Status before the first public Cross-Agent Teams release. The release name is
+**Cross-Agent Teams** (`cross-agent-teams`): this substantially changed release
+builds on the earlier xats work and is not the same project/release. The existing
+npm installer remains `xats-setup`; legacy daemon/tool identifiers remain where
+compatibility requires them.
 
-## Blockers
+## Readiness
 
-| # | Blocker | State | Notes |
-|---|---|---|---|
-| 1 | macOS never verified | **cleared** | GitHub-hosted `macos-latest` in the matrix; suite passes on node 22 and 24. |
-| 2 | Windows never verified for the suite | **cleared** | `windows-latest` x node 22/24 green (installer smoke separately). |
-| 3 | Vendored daemon | **cleared** | The daemon is ours: `daemon/src` built by `npm run build:daemon`, MIT, upstream credited in `daemon/NOTICE`, lineage stated in `daemon/SOURCE.md` (upstream basis `7c37997`, imported as a snapshot, **no merge base claimed**). The vendored `assets/daemon/cli.js` and the false `PROVENANCE.json` are deleted. |
-| 3b | Licence | **cleared** | Root `LICENSE` (MIT) + `NOTICE` crediting upstream; both shipped in the tarball. |
-| 4 | Naming | **open** | `xats` vs `cross-agent-teams-mcp` appear side by side in README and error text. Pick one front-facing name. |
-| 5 | One-command demo | **cleared** | `npm run demo` starts two agents, delivers a message and reports latency (~13 ms locally); `--private` ignores any running bus, and CI runs it on every platform. | `xats demo`: starts two sessions, exchanges a message, shows both sides. Doubles as smoke test and reviewer-verifiable claim. |
-| 6 | Daemon repo public | **open** | Source ships inside the `xats-setup` tarball, so it is readable either way; a standalone public repo is the cleaner launch story. Your call. |
-| 7 | Security page | **cleared** | `docs/SECURITY.md`: trust boundaries table, the `manual`/`shared`/`open` decision with the reasoning for an allowlist, revocation, and an explicit prompt-injection section stating what remains after approval. | Threat model, especially prompt-injection via peer messages: approval model, `manual` default, loopback-only daemon, no inbound port, every message visible in the host UI. |
-
-## CI gates
-
-`.github/workflows/ci.yml` runs on every PR and on `main`, 13 jobs:
-
-| Job | Matrix | What it proves |
+| Area | State | Evidence / remaining work |
 |---|---|---|
-| `test` | ubuntu / macos / windows x node 22, 24 | the suite, 90 tests, daemon-backed ones skipped (no deps on a clean checkout) |
-| `install-smoke` | ubuntu / macos / windows | installer in a sandboxed `HOME` **and** `XDG_CONFIG_HOME`; dry run first, then a real install |
-| `test-daemon` | ubuntu / **macos-13 (x64)** / **macos-14 (arm64)** / windows | the daemon-backed identity tests actually execute (`npm ci` provides `fastify` + `better-sqlite3` via the devDependency) |
+| Cross-platform CI | **historical pass; rerun required** | xats-setup PR #1 passed 15/15 GitHub-hosted jobs at head `1abafc59` (run `39884356274`) across Linux, macOS, and Windows. That result predates the current uncommitted Claude binding and launch-copy changes. Run CI on the final commit before merge/release. |
+| Owned daemon | **source and build present** | `daemon/src` is maintained in this repo and built with `npm run build:daemon`. Upstream lineage is credited in `daemon/NOTICE` and `daemon/SOURCE.md`; no merge base is claimed. |
+| Tests | **full local pass; exact-head CI pending** | The updated full suite passed 101/101 tests after the mailbox-cursor fix; the daemon bundle built and the cursor + REST endpoint checks passed 4/4. This is not a final cross-platform or exact-head CI result. |
+| Claude mailbox continuity | **deployed; live checks passed** | The owner-driven Claude restart and a later daemon-only restart both recovered the original session-keyed agent ID on the first `get_inbox`, without `register_agent` or a Claude restart after the latter. `xats-daemon.service` is healthy on `:9100`; the SQLite backup passed `integrity_check`. A pre-deployment MCP connection still needs Claude restart/resume to rerun SessionStart; do not recover by registering the same name/PID. |
+| MCP/plugin duplicate notices | **deployed; live daemon/mod checks passed** | The loopback-only read-only `/api/cursor` endpoint and Claude mod filtering suppress notices already consumed through MCP, both during polling and just before submit. The live daemon/mod probe suppressed a consumed event and submitted a fresh unread event; after daemon restart, the Claude agent's first `get_inbox` returned the original agent ID and did not re-announce earlier read mail. Cursor lookup failure still falls back to prior notification behavior. |
+| Security disclosure | **corrected in working tree; review required** | `docs/SECURITY.md`, README, and Stage 1 networking docs now distinguish signed HTTP requests and pinned TLS from message-envelope signing/sealing; explain manual-only approval, local revocation, and direct-only networking. Review against code and tests before merge. |
+| Approval policy | **manual only** | The runtime requires explicit approval for all new peers. `shared` and `open` can be saved but do not auto-approve; CLI and docs now warn. |
+| Product naming | **decided** | Use Cross-Agent Teams / `cross-agent-teams`, explicitly describe substantial changes built on earlier xats work, and keep `xats-setup` as the current npm installer identity. |
+| Standalone daemon repo | **visibility change pending audit** | User wants `Abdk4Moura/xats-daemon` public. Audit repository contents, history, workflows, and secret-bearing files before changing visibility. |
+| npm release | **not ready** | npm has `xats-setup@0.3.6`; the checkout is `0.3.7`. Do not publish until final changes are committed, exact-head CI passes, the Claude restart check is reported, and release files/version are reviewed. |
+| Optional direct peers | **scope claims narrowly** | Automated pairing, pinned HTTPS, federation, and routed-namespace tests exist. A physical cross-host check is not established in this launch evidence. Stage 1 is direct IP only; no relay, general Internet federation, Filament/Tunlion dependency, or signed/sealed message envelopes. |
+| OMP | **unverified** | Integration code exists, but loading has not been verified on OMP; describe as experimental or omit from a guaranteed support list. |
 
-Guards that exist because each one caught a real failure:
+## Release gates
 
-- assert the test-file count — CAUGHT: 20 files were never committed, so a "green"
-  run covered 47 of 90 tests over half a project.
-- assert `# tests 90` and that the daemon-backed identity test **ran** (by name, not
-  `# skipped 0`) — one skip is legitimate: the routed-namespace E2E needs Linux
-  root + netns, which a hosted runner does not grant.
-- preflight prints `platform/arch/os/hostname`, resolves `fastify`, opens
-  `better-sqlite3` and runs a statement, and `file`s the native `.node`.
-- `macos-13` and `macos-14` are pinned rather than `macos-latest`, because native
-  ABI and image drift are exactly what was failing.
+1. Finish and review the Claude post-restart first-call test; report whether the
+   same `agent_id` survives and `get_inbox` works without manual registration.
+2. Audit and correct all launch-facing security and capability claims. Keep
+   tests, design proposals, and live observations clearly separated.
+3. Audit `Abdk4Moura/xats-daemon` before changing its visibility. Check tracked
+   files, complete git history, tags, GitHub Actions/workflows, release assets,
+   and repository metadata for secrets or sensitive data. Do not publish until
+   the audit is clean.
+4. Review the entire changed xats-setup tree, build the daemon, run the complete
+   test suite, and verify exact-head GitHub Actions on Linux, macOS, and Windows.
+5. Verify `npm pack --dry-run`, package contents, README installation commands,
+   package version, and release notes. Keep `xats-setup` as the installer name
+   unless a deliberate package migration is approved.
+6. Merge PR #1 only after its final head passes CI and the owner approves. Publish
+   the npm release only after merge and a final package audit.
 
-Three traps this CI exists to prevent:
+## Shipped behavior vs proposals
 
-1. **Uncommitted source.** The first green-looking CI run executed **47 of 90**
-   tests because 5 test files (and the Claude mod, Codex component, overlay
-   discovery, peer config and OpenCode TUI plugin) had never been committed. CI
-   tested an older subset of the project and passed. The guard step now asserts
-   the test-file count, so an incomplete checkout fails instead of going green.
-2. **Glob-dependent test discovery.** Shell globbing breaks on Windows `cmd`, and
-   a glob that matches fewer files still exits 0. `scripts/run-tests.mjs`
-   enumerates `test/*.test.mjs` and passes explicit paths to `node --test`.
-3. **Installer skipping an absent agent.** `install.mjs` correctly skips an agent
-   whose config dir does not exist, so a smoke test must create
-   `.config/opencode` first — otherwise the assertion fails for the right reason.
-
-## Cross-cutting lesson: exit 0 lies
-
-Three separate defects in one day all shared a shape — a *status* that disagreed
-with *state*:
-
-| Where | Status said | State was |
-|---|---|---|
-| `tunlion expose` (pre-fix) | exit 0 | saved but **not bound** |
-| `tunlion join` | error / exit != 0 | peer had **already certified** the device |
-| CI test job | success, 47 tests | suite is **90 tests** |
-
-Rule for anything user-facing or automated: **verify state, not status.**
-Concretely, before trusting a step, read back the thing it claims to have made
-(`--list`, `addr --json`, file presence, test counts) rather than the exit code.
-
-## Product findings from CI
-
-- **Daemon refuses to start on an unusable hostname.** `resolveLocalDeviceLabel`
-  normalises `os.hostname()` and throws `invalid_device_label` when the result is
-  empty or over 64 chars — while falling back to `"local"` when the label is
-  *absent*. macOS hostnames are commonly dotted or spaced (`Mac's MacBook Pro`),
-  so first run can fail for a reason no user could guess. Should normalise, then
-  fall back, exactly like the absent case. Found by the macOS runner via the
-  daemon's stderr; open, and it belongs with the vendored-daemon decision below.
-
-## Roadmap (not blockers)
-
-- federation: signed envelopes + handle discovery + relay (design agreed, unbuilt)
-- tunlion library embed (`L3::dial` / `open_link`) replacing CLI + socket dialing
-- LiteLLM-in-CI so repeated Claude Code integration runs do not spend real quota
+Current direct peer transport authenticates paired-peer HTTP requests with
+Ed25519 signatures and uses pinned HTTPS. Discovery is candidate-only and
+pairing is manually approved. Revocation removes local trust but is not a
+permanent denylist. The following remain proposals or future work and are not
+release claims: signed per-agent message envelopes, handles, recipient-sealed
+relays, durable revocation tombstones, `shared`/`open` runtime auto-approval, and
+offline/internet federation.
