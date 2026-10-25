@@ -1,0 +1,217 @@
+import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
+import { sendChannelWake } from '../daemon/channel-wake-send.js'
+import type { AgentType } from '../lib/agent-type.js'
+import type { DeliverySpec } from '../lib/delivery-spec.js'
+import {
+  dispatchCodexAppserverPoke,
+  type CodexAppserverDispatchResult,
+} from './codex-appserver-dispatch.js'
+import {
+  dispatchOpencodeServerPoke,
+  type OpencodeServerDispatchResult,
+} from './opencode-server-dispatch.js'
+
+export interface DispatchDeps {
+  channelWakeFanout?: ChannelWakeFanout
+  tmuxPoke: (args: { pane_id: string; content: string; skipGuard?: boolean }) => Promise<TmuxPokeResult>
+  codexAppserverDispatch?: (args: {
+    delivery: Extract<DeliverySpec, { kind: 'codex-appserver' }>
+    content: string
+  }) => Promise<CodexAppserverDispatchResult>
+  opencodeServerDispatch?: (args: {
+    delivery: Extract<DeliverySpec, { kind: 'opencode-server' }>
+    content: string
+  }) => Promise<OpencodeServerDispatchResult>
+}
+
+export type TmuxPokeResult =
+  | { ok: true; pane_tail_before: string; pane_tail_after: string }
+  | { error: string; detail?: unknown }
+
+export interface TargetRow {
+  agent_type: AgentType | null
+  delivery: DeliverySpec
+  tmux_pane_id: string | null
+}
+
+export interface DispatchInput {
+  content: string
+  meta: Record<string, string>
+  skipGuard?: boolean
+}
+
+export type DispatchResult =
+  | {
+      ok: true
+      transport_used: 'claude-channel'
+      channel_session_id: string
+    }
+  | {
+      ok: true
+      transport_used: 'tmux-poke'
+      pane_id: string
+      pane_tail_before: string
+      pane_tail_after: string
+    }
+  | {
+      ok: true
+      transport_used: 'codex-appserver'
+      thread_id: string
+    }
+  | {
+      ok: true
+      transport_used: 'opencode-server'
+      session_id: string
+    }
+  | {
+      error: string
+      detail?: unknown
+      transport_used?: 'tmux-poke' | 'codex-appserver' | 'opencode-server'
+    }
+
+export async function dispatchPoke(
+  deps: DispatchDeps,
+  target: TargetRow,
+  input: DispatchInput
+): Promise<DispatchResult> {
+  const agentType = resolveAgentType(target)
+  if (agentType === 'claude-code') return dispatchClaude(deps, target, input)
+  if (agentType === 'codex') return dispatchCodex(deps, target, input)
+  if (agentType === 'opencode') return dispatchOpencode(deps, target, input)
+  return dispatchUnknown(deps, target, input)
+}
+
+function resolveAgentType(target: TargetRow): AgentType | null {
+  if (target.agent_type) return target.agent_type
+  if (target.delivery.kind === 'claude-channel') return 'claude-code'
+  if (target.delivery.kind === 'codex-appserver') return 'codex'
+  if (target.delivery.kind === 'opencode-server') return 'opencode'
+  return null
+}
+
+async function dispatchTmux(
+  deps: DispatchDeps,
+  paneId: string,
+  content: string,
+  skipGuard?: boolean
+): Promise<DispatchResult> {
+  const tmuxResult = await deps.tmuxPoke({ pane_id: paneId, content, skipGuard })
+  if ('ok' in tmuxResult && tmuxResult.ok) {
+    return {
+      ok: true,
+      transport_used: 'tmux-poke',
+      pane_id: paneId,
+      pane_tail_before: tmuxResult.pane_tail_before,
+      pane_tail_after: tmuxResult.pane_tail_after,
+    }
+  }
+  return {
+    ...(tmuxResult as { error: string; detail?: unknown }),
+    transport_used: 'tmux-poke',
+  }
+}
+
+async function dispatchClaude(
+  deps: DispatchDeps,
+  target: TargetRow,
+  input: DispatchInput
+): Promise<DispatchResult> {
+  const paneId = target.tmux_pane_id
+  const channelSubscribed =
+    target.delivery.kind === 'claude-channel' &&
+    (deps.channelWakeFanout?.has(target.delivery.channel_session_id) ?? false)
+
+  if (target.delivery.kind === 'claude-channel' && channelSubscribed && deps.channelWakeFanout) {
+    const result = sendChannelWake(
+      deps.channelWakeFanout,
+      target.delivery.channel_session_id,
+      input
+    )
+    if (result.ok) {
+      return {
+        ok: true,
+        transport_used: 'claude-channel',
+        channel_session_id: target.delivery.channel_session_id,
+      }
+    }
+  }
+
+  // A tmux keystroke lands in the person's composer, so peer mail would look
+  // like something they typed. Without a live channel the wake is undeliverable;
+  // the message stays in the inbox for the agent to read on its next turn.
+  return {
+    error: 'no_transport_available',
+    detail: {
+      channel_subscribed: channelSubscribed,
+      tmux_pane_set: Boolean(paneId),
+      tmux_keystroke_refused: true,
+    },
+  }
+}
+
+async function dispatchCodex(
+  deps: DispatchDeps,
+  target: TargetRow,
+  input: DispatchInput
+): Promise<DispatchResult> {
+  const paneId = target.tmux_pane_id
+  if (target.delivery.kind === 'codex-appserver') {
+    const result = await (deps.codexAppserverDispatch ?? dispatchCodexAppserverPoke)({
+      delivery: target.delivery,
+      content: input.content,
+    })
+    if ('ok' in result && result.ok) return result
+    if (paneId) return dispatchTmux(deps, paneId, input.content, input.skipGuard)
+    return result
+  }
+  if (paneId) return dispatchTmux(deps, paneId, input.content, input.skipGuard)
+  return {
+    error: 'no_transport_available',
+    detail: {
+      codex_bound: false,
+      tmux_pane_set: false,
+    },
+  }
+}
+
+async function dispatchOpencode(
+  deps: DispatchDeps,
+  target: TargetRow,
+  input: DispatchInput
+): Promise<DispatchResult> {
+  if (target.delivery.kind === 'opencode-server') {
+    const result = await (deps.opencodeServerDispatch ?? dispatchOpencodeServerPoke)({
+      delivery: target.delivery,
+      content: input.content,
+    })
+    return result
+  }
+  // opencode agent without an opencode-server delivery falls back to tmux
+  // (legacy `agent_type='opencode'` callers that did not pass base_url used
+  // the tmux runtime-bind path; this branch preserves that behavior).
+  const paneId = target.tmux_pane_id
+  if (paneId) return dispatchTmux(deps, paneId, input.content, input.skipGuard)
+  return {
+    error: 'no_transport_available',
+    detail: {
+      opencode_bound: false,
+      tmux_pane_set: false,
+    },
+  }
+}
+
+async function dispatchUnknown(
+  deps: DispatchDeps,
+  target: TargetRow,
+  input: DispatchInput
+): Promise<DispatchResult> {
+  const paneId = target.tmux_pane_id
+  if (paneId) return dispatchTmux(deps, paneId, input.content, input.skipGuard)
+  return {
+    error: 'no_transport_available',
+    detail: {
+      channel_subscribed: false,
+      tmux_pane_set: false,
+    },
+  }
+}

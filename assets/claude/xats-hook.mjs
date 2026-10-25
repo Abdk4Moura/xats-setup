@@ -41,7 +41,27 @@ const TEAM = process.env.XATS_TEAM || 'default';
 const MODE = process.argv[2];
 
 const host = os.hostname().split('.')[0];
-const idFileFor = (tag) => path.join(os.tmpdir(), `.xats-agent-id-${tag}`);
+// Keep session id files in the owner-only xats state directory, not /tmp.
+// /tmp can be a full tmpfs and a raw session id should never become a path.
+const sessionDir = path.join(os.homedir(), '.xats', 'sessions');
+const idFileFor = (tag) => path.join(sessionDir, `${createHash('sha256').update(tag).digest('hex')}.id`);
+const bindFileFor = (tag) => path.join(sessionDir, `${createHash('sha256').update(tag).digest('hex')}.bind`);
+
+function ensurePrivateCursorFile(tag, agentId) {
+  // The mod uses this same session-key filename. Its sandboxed $.fs.write has
+  // no mode option, so precreate the file at 0600 before the mod starts, then
+  // later writes preserve that mode. Never overwrite an accepted cursor.
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(tag)) return;
+  const file = path.join(sessionDir, `${tag}.cursor.json`);
+  try {
+    const fd = fs.openSync(file, 'wx', 0o600);
+    try { fs.writeFileSync(fd, `${JSON.stringify({ version: 1, agent_id: agentId, event_id: 0 })}\n`); }
+    finally { fs.closeSync(fd); }
+  } catch (error) {
+    if (error.code !== 'EEXIST') return; // absence replays, never loses mail
+  }
+  try { fs.chmodSync(file, 0o600); } catch { /* Windows ACLs differ */ }
+}
 
 async function post(pathname, body) {
   const ctrl = new AbortController();
@@ -123,17 +143,25 @@ async function start() {
   // daemon reject the register as device_spoofing_from_loopback on any dotted
   // hostname. Omitting it makes the daemon use its own local device, exactly
   // as the Pi and opencode adapters do.
-  const body = { name: id.name, team: TEAM, agent_type: 'claude-code', session_key: id.sessionKey ?? undefined, name_mode: id.mode };
+  const body = { name: id.name, team: TEAM, agent_type: 'claude-code', session_key: id.sessionKey ?? undefined, name_mode: id.mode, bind_mcp: Boolean(id.sessionKey) };
   if (id.delivery) body.delivery = id.delivery;
   const resp = await post('/api/register', body);
   const agentId = resp && resp.agent_id;
   if (!agentId) return; // daemon unreachable — silently continue
 
-  fs.writeFileSync(idFileFor(id.tag), agentId);
+  fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(idFileFor(id.tag), agentId, { mode: 0o600 });
+  if (id.sessionKey && typeof resp.bind_token === 'string' && /^[0-9a-f]{64}$/.test(resp.bind_token)) {
+    // Write only into the private xats session directory. A missing/torn token
+    // fails closed: the MCP hook never guesses another session's identity.
+    fs.writeFileSync(bindFileFor(id.tag), resp.bind_token, { mode: 0o600 });
+    try { fs.chmodSync(bindFileFor(id.tag), 0o600); } catch { /* Windows ACLs differ */ }
+  }
+  ensurePrivateCursorFile(id.tag, agentId);
   // The daemon is authoritative and may have disambiguated the name (name-2) or
   // returned the name this session already owned; record it for observability.
   if (resp && typeof resp.name === 'string' && resp.name) {
-    try { fs.writeFileSync(idFileFor(`${id.tag}.name`), resp.name); } catch { /* ignore */ }
+    try { fs.writeFileSync(idFileFor(`${id.tag}.name`), resp.name, { mode: 0o600 }); } catch { /* ignore */ }
   }
 }
 
@@ -145,7 +173,9 @@ async function end() {
   try { agentId = fs.readFileSync(f, 'utf8').trim(); } catch { /* nothing to do */ }
   if (agentId) {
     try { fs.unlinkSync(f); } catch { /* ignore */ }
-    await post('/api/deregister', { agent_id: agentId });
+    try { fs.unlinkSync(idFileFor(`${id.tag}.name`)); } catch { /* ignore */ }
+    try { fs.unlinkSync(bindFileFor(id.tag)); } catch { /* ignore */ }
+    await post('/api/deregister', { agent_id: agentId, session_key: id.sessionKey ?? undefined, retain_mailbox: Boolean(id.sessionKey) });
   }
 }
 
