@@ -1,0 +1,38 @@
+{
+  "name": "xats-mcp",
+  "version": "0.1.0",
+  "description": "stdio MCP bridge to a local xats daemon: lets any MCP client join the cross-agent bus that Claude Code, Codex, OpenCode and Pi already share.",
+  "type": "module",
+  "bin": {
+    "xats-mcp": "src/index.mjs"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "mcpName": "io.github.abdk4moura/xats",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "xats",
+    "cross-agent",
+    "agents",
+    "stdio"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Abdk4Moura/xats-setup.git"
+  },
+  "homepage": "https://github.com/Abdk4Moura/xats-setup",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1"
+  },
+  "scripts": {
+    "test": "node test-stdio.mjs"
+  }
+}

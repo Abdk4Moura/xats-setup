@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.abdk4moura/xats",
+  "description": "One agent roster and inbox shared by Claude Code, Codex, OpenCode and Pi.",
+  "repository": {
+    "url": "https://github.com/Abdk4Moura/xats-setup",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "xats-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "XATS_MCP_URL",
+          "description": "Full MCP URL of a running xats daemon. Defaults to http://127.0.0.1:9100/mcp.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "XATS_PORT",
+          "description": "Port of a running xats daemon when XATS_MCP_URL is unset. Default 9100.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
