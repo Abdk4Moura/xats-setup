@@ -45,8 +45,13 @@ jobs:
           node-version: '22.14.0'
           package-manager-cache: false
 
-      - name: Show the npm CLI that will publish
+      - name: Install an npm that speaks OIDC
+        # Trusted publishing needs npm >= 11.5.1, and the npm bundled with Node
+        # 22.14 is 10.x, which silently falls back to token auth and fails with
+        # ENEEDAUTH. Pin the major so the workflow cannot drift onto the
+        # unbundled latest.
         run: |
+          npm install -g npm@^11.5.1
           node --version
           npm --version
 
