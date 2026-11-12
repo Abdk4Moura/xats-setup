@@ -39,10 +39,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # 22.14 or later is the floor for trusted publishing. Do not set
-          # registry-url: it would write an .npmrc with an empty
-          # NODE_AUTH_TOKEN, which fights the OIDC flow.
-          node-version: '22.14.0'
+          # Node 24, because npm 12 refuses to install on 22.14 (EBADENGINE)
+          # and npm 12 is the current line for OIDC publishing. Do not set
+          # registry-url: it writes an .npmrc with an empty NODE_AUTH_TOKEN,
+          # which fights the OIDC flow.
+          node-version: '24'
           package-manager-cache: false
 
       - name: Install an npm that speaks OIDC
