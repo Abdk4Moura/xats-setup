@@ -51,7 +51,7 @@ jobs:
         # ENEEDAUTH. Pin the major so the workflow cannot drift onto the
         # unbundled latest.
         run: |
-          npm install -g npm@^11.5.1
+          npm install -g npm@^12.2.0
           node --version
           npm --version
 
@@ -122,8 +122,10 @@ jobs:
 
       - name: Publish
         if: steps.probe.outputs.exists == 'false'
-        # Provenance is automatic under trusted publishing, and the OIDC
-        # credential is minted per run, so no token is configured here.
+        # No token is configured. npm exchanges the GitHub OIDC identity for a
+        # short-lived publish credential, and provenance is generated from it.
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
         run: npm publish --access public
 
       - name: Report
