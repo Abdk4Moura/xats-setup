@@ -122,12 +122,24 @@ jobs:
           echo "npm auth token configured: $(npm config get //registry.npmjs.org/:_authToken >/dev/null 2>&1 && echo yes || echo no)"
 
       - name: Publish
+        id: publish
         if: steps.probe.outputs.exists == 'false'
-        # No token is configured. npm exchanges the GitHub OIDC identity for a
-        # short-lived publish credential, and provenance is generated from it.
+        # No token is configured. npm should exchange the GitHub OIDC identity
+        # for a short-lived publish credential.
+        continue-on-error: true
         env:
           NPM_CONFIG_PROVENANCE: 'true'
+          NPM_CONFIG_LOGLEVEL: silly
         run: npm publish --access public
+
+      - name: Auth diagnostics from the npm log
+        if: steps.publish.outcome == 'failure'
+        run: |
+          log=$(ls -t "$HOME"/.npm/_logs/*debug-0.log 2>/dev/null | head -1)
+          echo "log: $log"
+          grep -iE 'oidc|trusted|id_token|www-authenticate|401|403|auth|token' "$log" \
+            | sed -E 's/(eyJ[A-Za-z0-9._-]{20,})/<jwt redacted>/g; s/(_authToken=)[^ ]*/\1<redacted>/g' \
+            | head -40
 
       - name: Report
         if: steps.probe.outputs.exists == 'true'
