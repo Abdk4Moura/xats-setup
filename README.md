@@ -12,6 +12,14 @@ name `xats-setup`:
 npx xats-setup
 ```
 
+If you use Claude Code and want the native mail drawing, install the plugin from
+this repository's marketplace in one step (Claude Code 2.1.275 or later, while
+the npm installer still handles the daemon and the other hosts):
+
+```
+/plugin install xats --marketplace Abdk4Moura/xats-setup
+```
+
 The local daemon starts at login. The optional peer runtime can be installed,
 but its network listener stays off until you explicitly enable it.
 
