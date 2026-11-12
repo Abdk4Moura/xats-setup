@@ -1,12 +1,34 @@
 # Cross-Agent Teams
 
-**Cross-Agent Teams** (`cross-agent-teams`) is a substantially evolved
-implementation built on the earlier xats work; it is a new release with major
-changes to the daemon, agent integrations, per-session identity, and optional
-direct-peer transport. It is not the same as the pre-existing xats project.
+One roster and one set of inboxes shared by Claude Code, Codex, OpenCode and Pi.
+A local daemon, no account, and identities that outlive a single session.
 
-Install it on Windows, macOS, or Linux with the existing npm installer/package
-name `xats-setup`:
+Cross-Agent Teams (`cross-agent-teams`) is a substantially evolved implementation
+built on the earlier xats work: a new release with major changes to the daemon,
+agent integrations, per-session identity, and optional direct-peer transport. It
+is not the same as the pre-existing xats project.
+
+## Why this exists
+
+Every host now ships some form of agent coordination inside its own walls. Claude
+Code's agent teams give one session a lead, teammates, a shared task list and
+mailboxes, and its documentation scopes that to a single session: one team per
+session, teammates not restored by `/resume`, and no sharing of a team across
+sessions. That is a good design for work inside one tool.
+
+It cannot cross a vendor boundary. A Claude Code session has no way to address a
+Codex or Pi session, and Anthropic has no reason to build one. That gap is what
+this project fills: the same roster, the same inboxes, the same message history,
+regardless of which agent you are running, plus identities that persist after a
+session ends so a resumed agent keeps its address and its unread mail.
+
+If you only ever use one agent, the built-in feature is the lower friction choice
+and you probably do not need this.
+
+## Install
+
+Windows, macOS, or Linux, with the existing npm installer/package name
+`xats-setup`:
 
 ```sh
 npx xats-setup
@@ -23,13 +45,13 @@ the npm installer still handles the daemon and the other hosts):
 The local daemon starts at login. The optional peer runtime can be installed,
 but its network listener stays off until you explicitly enable it.
 
-```sh
-npx xats-setup
-```
-
 That's the whole install. It is **idempotent** (safe to re-run) and needs **no
 sudo** (everything lands under `~/.xats`). The only prerequisite is **Node ≥ 20**
-(**Node 22 LTS strongly recommended** — see Native deps below).
+(Node 22 LTS strongly recommended, see Native deps below).
+
+Using an MCP client that only speaks stdio, or a registry-driven agent host?
+`npx -y xats-mcp` bridges stdio to the running daemon. The project is listed in
+the official MCP Registry as `io.github.Abdk4Moura/xats`.
 
 ## What it does
 
@@ -50,14 +72,14 @@ sudo** (everything lands under `~/.xats`). The only prerequisite is **Node ≥ 2
 ## Usage
 
 ```sh
-npx xats-setup                 # interactive — press Enter for all components, or c to pick agents
+npx xats-setup                 # interactive: press Enter for all components, or c to pick agents
 npx xats-setup --yes           # non-interactive full install (CI / scripts); peer listener remains off
 npx xats-setup --dry-run       # preview every action, change nothing
 npx xats-setup --only=daemon,service,pi   # just Pi on this box (no prompt)
 npx xats-setup --only=peer               # install the Stage 1 peer runtime only
 npx xats-setup --only=pi       # only Pi's extension+skill (needs a running daemon elsewhere)
 npx xats-setup --only=omp      # only OMP's extension+skill
-npx xats-setup --without claude,pi  # generic verb — exclude any list (aliases: --except/--exclude/--skip/--omit)
+npx xats-setup --without claude,pi  # generic verb: exclude any list (aliases: --except/--exclude/--skip/--omit)
 npx xats-setup --without=bridge       # same as --no-bridge, no endless --no-* flags
 npx xats-setup --no-claude            # single-component shorthand still works
 npx xats-setup --label umar    # prefix for this box's agent identities
@@ -66,9 +88,9 @@ npx xats-setup reset           # remove everything xats-setup installed
 npx xats-setup reset --only=pi # remove only Pi's bits
 ```
 
-Each agent (`claude`, `pi`, `omp`, `opencode`, `mimocode`) is optional. Default is **all** — users normally want cross-agent talk — but pick any subset with `--only=` or `--without`/`--except`. `omp` is independent of `pi` (same `xats.ts` works for both, installed to `~/.pi` vs `~/.omp`).
+Each agent (`claude`, `pi`, `omp`, `opencode`, `mimocode`) is optional, and the default is **all**, since most people want cross-agent talk. Pick any subset with `--only=` or `--without`/`--except`. `omp` is independent of `pi` (same `xats.ts` works for both, installed to `~/.pi` vs `~/.omp`).
 
-**Ephemeral loader + log:** in a TTY the installer shows a single-line loader (`⠋ current step — log /tmp/xats-setup-…log`) that disappears on finish; all detail goes to `$(os.tmpdir())/xats-setup-*.log`. Final summary is clean and prints `Log: /tmp/… — cat for verbose output`. Use `--verbose`/`--no-ephemeral` to stream live logs instead.
+**Ephemeral loader + log:** in a TTY the installer shows a single-line loader (`⠋ current step, log /tmp/xats-setup-…log`) that disappears on finish; all detail goes to `$(os.tmpdir())/xats-setup-*.log`. Final summary is clean and prints `Log: /tmp/…`, with `cat` for verbose output. Use `--verbose`/`--no-ephemeral` to stream live logs instead.
 
 **Interactive:** `npx xats-setup` with no flags in a TTY opens a picker: `Enter`=all, `c`=toggle each `Y/n` (shows `found/not found`), `n`=none, `q`=quit. Use `--yes`/`--only`/`--without` to skip (CI, scripts, re-runs). The picker is skipped when `CI=1` or stdin is piped.
 
@@ -91,7 +113,7 @@ The OpenCode and Claude integrations use session-specific identity in the owned 
 **Identity is per session, not per box.** The Pi/OMP extensions and OpenCode v2 plugin register each session as `<kind>-<host>-<label>-<session8>`, where `label` (`~/.xats/label`, `XATS_LABEL`, or `--label`) is only a human-readable prefix and `session8` is derived from the session id. Two OpenCode v2 tabs in the same location therefore have distinct identities and inboxes. OpenCode v1 and Mimocode retain the legacy adapter.
 
 To pin a stable identity prefix, set `XATS_NAME` (e.g. `XATS_NAME=lend-gpu-worker`); OpenCode v2 appends a session suffix so separate tabs remain addressable. An agent can also claim a name at runtime with `xats_claim_name`; that binding is scoped to the session, so it returns on resume but a brand-new session starts from the computed default. The daemon is the authority: it disambiguates a colliding preferred name with a `-2` suffix and refuses an exact claim that a live agent already holds.
-Health check: `curl http://127.0.0.1:$(cat ~/.xats/port 2>/dev/null || echo 9100)/health` — setup also runs an ephemeral bus probe (`register → list → deregister`) and verifies each selected component’s files.
+Health check: `curl http://127.0.0.1:$(cat ~/.xats/port 2>/dev/null || echo 9100)/health`. Setup also runs an ephemeral bus probe (`register → list → deregister`) and verifies each selected component’s files.
 
 ## Stage 1 direct peer networking
 
@@ -114,7 +136,7 @@ xats-setup peer restart
 xats-setup peer disable    # stop and remove autostart/firewall rule
 ```
 
-The peer listener binds all interfaces by default and selects a stable port from TCP 9110–9120. Review `xats-setup peer status` for addresses; if multiple are listed, choose the address the other machine can reach. `peer enable` is the explicit network-exposure action. On Windows it best-effort adds a firewall allow rule for the saved peer port (or the default 9110–9120 range on first launch). No daemon HTTP/MCP API is exposed.
+The peer listener binds all interfaces by default and selects a stable port from TCP 9110 to 9120. Review `xats-setup peer status` for addresses; if multiple are listed, choose the address the other machine can reach. `peer enable` is the explicit network-exposure action. On Windows it best-effort adds a firewall allow rule for the saved peer port (or the default 9110 to 9120 range on first launch). No daemon HTTP/MCP API is exposed.
 
 For LAN discovery, run the service on both machines, then:
 
@@ -155,12 +177,12 @@ npx xats-setup reset --dry-run
 
 Reset stops and unregisters the xats daemon and peer services (if selected), removes `~/.xats` (or just the selected component state for component-only resets), removes
 xats's Claude hook/MCP entry, its OpenCode/mimocode plugin entries and copied
-files, and Pi's `~/.pi/agent/extensions/xats.ts` plus xats skill — only for the selected components (`reset --only=pi` touches just Pi). It deliberately
+files, and Pi's `~/.pi/agent/extensions/xats.ts` plus xats skill, only for the selected components (`reset --only=pi` touches just Pi). It deliberately
 leaves unrelated harness settings, plugins, skills, and MCP servers intact.
 
 ## Updating
 
-Re-run the same command — it's an in-place update:
+Re-run the same command; it's an in-place update:
 
 ```sh
 npx xats-setup@latest
@@ -189,7 +211,7 @@ if present, else degrade to empty reads).
 ## Native deps / Node version
 
 The daemon's only native dependency is `better-sqlite3`. Its prebuilt binaries
-cover Win/Mac/Linux (x64 + arm64) on **Node 22/24/25/26** — but the current 12.x
+cover Win/Mac/Linux (x64 + arm64) on **Node 22/24/25/26**, but the current 12.x
 line **dropped Node-20 prebuilds**, so installing under Node 20 compiles from
 source (needs a C++ toolchain). The installer detects this and pins
 `better-sqlite3@12.9.0` (last with a Node-20 prebuild) automatically, but **Node
