@@ -100,6 +100,26 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Diagnose OIDC availability
+        # Prints statuses only, never token values. If the request token is absent
+        # the job lacks id-token permission. If the exchange fails the runner
+        # cannot mint an npm audience token. If both succeed and publish still
+        # says ENEEDAUTH, the trusted publisher record on npmjs.com is the
+        # mismatch (user, repository, or workflow filename, all case-sensitive).
+        run: |
+          set -uo pipefail
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL present: $([ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && echo yes || echo no)"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN present: $([ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] && echo yes || echo no)"
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            code=$(curl -sS -o /tmp/oidc.json -w '%{http_code}' \
+              -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" || echo 000)
+            echo "OIDC exchange HTTP status: $code"
+            node -e 'const f="/tmp/oidc.json";try{const d=JSON.parse(require("fs").readFileSync(f,"utf8"));console.log("token returned:", typeof d.value==="string" && d.value.length>0 ? "yes (length "+d.value.length+")" : "no")}catch(e){console.log("exchange body unreadable")}'
+          fi
+          echo "npm config registry: $(npm config get registry)"
+          echo "npm auth token configured: $(npm config get //registry.npmjs.org/:_authToken >/dev/null 2>&1 && echo yes || echo no)"
+
       - name: Publish
         if: steps.probe.outputs.exists == 'false'
         # Provenance is automatic under trusted publishing, and the OIDC
