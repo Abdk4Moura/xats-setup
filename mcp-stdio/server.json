@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.abdk4moura/xats",
+  "name": "io.github.Abdk4Moura/xats",
   "description": "One agent roster and inbox shared by Claude Code, Codex, OpenCode and Pi.",
   "repository": {
     "url": "https://github.com/Abdk4Moura/xats-setup",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "xats-mcp",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
         "type": "stdio"
       },
