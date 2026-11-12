@@ -1,0 +1,106 @@
+name: publish-mcp
+
+# Publishes mcp-stdio/ (the xats-mcp package) to npm using OIDC trusted
+# publishing. There is no long-lived npm token anywhere in this workflow: npm
+# detects the GitHub OIDC identity, checks it against the trusted publisher
+# configured for this package, and issues a short-lived credential.
+#
+# Requires, on npmjs.com under the xats-mcp package settings:
+#   publisher: GitHub Actions
+#   organization or user: Abdk4Moura
+#   repository: xats-setup
+#   workflow filename: publish-mcp.yml
+#   allowed actions: npm publish
+# and npm CLI >= 11.5.1 on Node >= 22.14.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'xats-mcp-v*'
+
+permissions:
+  contents: read
+  id-token: write # required to mint the OIDC token npm exchanges for a publish credential
+
+concurrency:
+  group: publish-mcp
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mcp-stdio
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22.14 or later is the floor for trusted publishing. Do not set
+          # registry-url: it would write an .npmrc with an empty
+          # NODE_AUTH_TOKEN, which fights the OIDC flow.
+          node-version: '22.14.0'
+          package-manager-cache: false
+
+      - name: Show the npm CLI that will publish
+        run: |
+          node --version
+          npm --version
+
+      - name: Syntax check the bridge
+        run: node --check src/index.mjs
+
+      - name: Validate server.json shape
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const s = JSON.parse(fs.readFileSync("server.json", "utf8"));
+            const fail = (m) => { console.error(m); process.exit(1); };
+            if (!/^io\.github\.[A-Za-z0-9_-]+\/[A-Za-z0-9._-]+$/.test(s.name || "")) fail("bad name: " + s.name);
+            if (!s.description || s.description.length > 100) fail("description must be 1 to 100 chars");
+            const p = s.packages?.[0];
+            if (!p) fail("no packages entry");
+            if (p.registryType !== "npm") fail("registryType must be npm");
+            if (p.transport?.type !== "stdio") fail("transport must be stdio for this package");
+            console.log("server.json shape ok");
+          '
+
+      - name: Guard mcpName and version agreement
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const srv = JSON.parse(fs.readFileSync("server.json", "utf8"));
+            const p = srv.packages?.[0] ?? {};
+            const fail = (m) => { console.error(m); process.exit(1); };
+            if (pkg.mcpName !== srv.name) fail(`mcpName ${pkg.mcpName} != server.json name ${srv.name}`);
+            if (![pkg.version, srv.version, p.version].every(v => v === pkg.version)) {
+              fail(`version drift: package ${pkg.version}, server ${srv.version}, package entry ${p.version}`);
+            }
+            console.log("consistent:", srv.name, pkg.version);
+          '
+
+      - name: Skip if this version is already published
+        id: probe
+        run: |
+          v=$(node -p "require('./package.json').version")
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/xats-mcp/$v")
+          echo "registry says $code for xats-mcp@$v"
+          if [ "$code" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.probe.outputs.exists == 'false'
+        # Provenance is automatic under trusted publishing, and the OIDC
+        # credential is minted per run, so no token is configured here.
+        run: npm publish --access public
+
+      - name: Report
+        if: steps.probe.outputs.exists == 'true'
+        run: echo "xats-mcp@$(node -p "require('./package.json').version") is already on the registry; nothing to do."
