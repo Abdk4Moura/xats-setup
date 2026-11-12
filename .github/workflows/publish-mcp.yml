@@ -1,0 +1,146 @@
+name: publish-mcp
+
+# Publishes mcp-stdio/ (the xats-mcp package) to npm using OIDC trusted
+# publishing. There is no long-lived npm token anywhere in this workflow: npm
+# detects the GitHub OIDC identity, checks it against the trusted publisher
+# configured for this package, and issues a short-lived credential.
+#
+# Requires, on npmjs.com under the xats-mcp package settings:
+#   publisher: GitHub Actions
+#   organization or user: Abdk4Moura
+#   repository: xats-setup
+#   workflow filename: publish-mcp.yml
+#   allowed actions: npm publish
+# and npm CLI >= 11.5.1 on Node >= 22.14.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'xats-mcp-v*'
+
+permissions:
+  contents: read
+  id-token: write # required to mint the OIDC token npm exchanges for a publish credential
+
+concurrency:
+  group: publish-mcp
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mcp-stdio
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24, because npm 12 refuses to install on 22.14 (EBADENGINE)
+          # and npm 12 is the current line for OIDC publishing. Do not set
+          # registry-url: it writes an .npmrc with an empty NODE_AUTH_TOKEN,
+          # which fights the OIDC flow.
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install an npm that speaks OIDC
+        # Trusted publishing needs npm >= 11.5.1, and the npm bundled with Node
+        # 22.14 is 10.x, which silently falls back to token auth and fails with
+        # ENEEDAUTH. Pin the major so the workflow cannot drift onto the
+        # unbundled latest.
+        run: |
+          npm install -g npm@^12.2.0
+          node --version
+          npm --version
+
+      - name: Syntax check the bridge
+        run: node --check src/index.mjs
+
+      - name: Validate server.json shape
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const s = JSON.parse(fs.readFileSync("server.json", "utf8"));
+            const fail = (m) => { console.error(m); process.exit(1); };
+            if (!/^io\.github\.[A-Za-z0-9_-]+\/[A-Za-z0-9._-]+$/.test(s.name || "")) fail("bad name: " + s.name);
+            if (!s.description || s.description.length > 100) fail("description must be 1 to 100 chars");
+            const p = s.packages?.[0];
+            if (!p) fail("no packages entry");
+            if (p.registryType !== "npm") fail("registryType must be npm");
+            if (p.transport?.type !== "stdio") fail("transport must be stdio for this package");
+            console.log("server.json shape ok");
+          '
+
+      - name: Guard mcpName and version agreement
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const srv = JSON.parse(fs.readFileSync("server.json", "utf8"));
+            const p = srv.packages?.[0] ?? {};
+            const fail = (m) => { console.error(m); process.exit(1); };
+            if (pkg.mcpName !== srv.name) fail(`mcpName ${pkg.mcpName} != server.json name ${srv.name}`);
+            if (![pkg.version, srv.version, p.version].every(v => v === pkg.version)) {
+              fail(`version drift: package ${pkg.version}, server ${srv.version}, package entry ${p.version}`);
+            }
+            console.log("consistent:", srv.name, pkg.version);
+          '
+
+      - name: Skip if this version is already published
+        id: probe
+        run: |
+          v=$(node -p "require('./package.json').version")
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/xats-mcp/$v")
+          echo "registry says $code for xats-mcp@$v"
+          if [ "$code" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Diagnose OIDC availability
+        # Prints statuses only, never token values. If the request token is absent
+        # the job lacks id-token permission. If the exchange fails the runner
+        # cannot mint an npm audience token. If both succeed and publish still
+        # says ENEEDAUTH, the trusted publisher record on npmjs.com is the
+        # mismatch (user, repository, or workflow filename, all case-sensitive).
+        run: |
+          set -uo pipefail
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL present: $([ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && echo yes || echo no)"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN present: $([ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] && echo yes || echo no)"
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            code=$(curl -sS -o /tmp/oidc.json -w '%{http_code}' \
+              -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" || echo 000)
+            echo "OIDC exchange HTTP status: $code"
+            node -e 'const f="/tmp/oidc.json";try{const d=JSON.parse(require("fs").readFileSync(f,"utf8"));console.log("token returned:", typeof d.value==="string" && d.value.length>0 ? "yes (length "+d.value.length+")" : "no")}catch(e){console.log("exchange body unreadable")}'
+          fi
+          echo "npm config registry: $(npm config get registry)"
+          echo "npm auth token configured: $(npm config get //registry.npmjs.org/:_authToken >/dev/null 2>&1 && echo yes || echo no)"
+
+      - name: Publish
+        id: publish
+        if: steps.probe.outputs.exists == 'false'
+        # No token is configured. npm should exchange the GitHub OIDC identity
+        # for a short-lived publish credential.
+        continue-on-error: true
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+          NPM_CONFIG_LOGLEVEL: silly
+        run: npm publish --access public
+
+      - name: Auth diagnostics from the npm log
+        if: steps.publish.outcome == 'failure'
+        run: |
+          log=$(ls -t "$HOME"/.npm/_logs/*debug-0.log 2>/dev/null | head -1)
+          echo "log: $log"
+          grep -iE 'oidc|trusted|id_token|www-authenticate|401|403|auth|token' "$log" \
+            | sed -E 's/(eyJ[A-Za-z0-9._-]{20,})/<jwt redacted>/g; s/(_authToken=)[^ ]*/\1<redacted>/g' \
+            | head -40
+
+      - name: Report
+        if: steps.probe.outputs.exists == 'true'
+        run: echo "xats-mcp@$(node -p "require('./package.json').version") is already on the registry; nothing to do."

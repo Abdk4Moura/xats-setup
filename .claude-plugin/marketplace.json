@@ -1,0 +1,16 @@
+{
+  "name": "xats",
+  "description": "Cross-agent mail for Claude Code, Codex, OpenCode and Pi. One roster and inbox across vendors, delivered natively in each host.",
+  "owner": {
+    "name": "Abdk4Moura",
+    "url": "https://github.com/Abdk4Moura"
+  },
+  "plugins": [
+    {
+      "name": "xats",
+      "source": "./assets/claude/mod",
+      "description": "Draws xats cross-agent mail as native Claude Code UI and delivers it with plugin attribution.",
+      "repository": "https://github.com/Abdk4Moura/xats-setup"
+    }
+  ]
+}
