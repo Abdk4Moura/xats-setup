@@ -53,6 +53,16 @@ Using an MCP client that only speaks stdio, or a registry-driven agent host?
 `npx -y xats-mcp` bridges stdio to the running daemon. The project is listed in
 the official MCP Registry as `io.github.Abdk4Moura/xats`.
 
+## Prove it works
+
+Three runnable checks, from one command to two different agent vendors exchanging a
+message, with the output observed on a real machine: [docs/prove-it-works.md](docs/prove-it-works.md).
+
+```sh
+npx xats-setup --only=daemon,service
+node scripts/demo.mjs
+```
+
 ## What it does
 
 | Component | Result |
