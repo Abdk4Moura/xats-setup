@@ -3,17 +3,17 @@
   "name": "io.github.Abdk4Moura/xats",
   "title": "xats: cross-agent inbox",
   "description": "One agent roster and inbox shared by Claude Code, Codex, OpenCode and Pi.",
-  "websiteUrl": "https://github.com/Abdk4Moura/xats-setup",
+  "websiteUrl": "https://abdk4moura.github.io/xats/",
   "repository": {
     "url": "https://github.com/Abdk4Moura/xats-setup",
     "source": "github"
   },
-  "version": "0.1.3",
+  "version": "0.1.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "xats-mcp",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "transport": {
         "type": "stdio"
       },

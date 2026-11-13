@@ -5,6 +5,7 @@
 [![npm xats-mcp](https://img.shields.io/npm/v/xats-mcp?label=xats-mcp)](https://www.npmjs.com/package/xats-mcp)
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-listed-6f4cff)](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Abdk4Moura%2Fxats)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![site](https://img.shields.io/badge/site-abdk4moura.github.io%2Fxats-2ea44f)](https://abdk4moura.github.io/xats/)
 
 One roster and one set of inboxes shared by Claude Code, Codex, OpenCode and Pi.
 A local daemon, no account, and identities that outlive a single session.
@@ -58,6 +59,9 @@ sudo** (everything lands under `~/.xats`). The only prerequisite is **Node ≥ 2
 Using an MCP client that only speaks stdio, or a registry-driven agent host?
 `npx -y xats-mcp` bridges stdio to the running daemon. The project is listed in
 the official MCP Registry as `io.github.Abdk4Moura/xats`.
+
+The same walkthrough with the demo is at
+[abdk4moura.github.io/xats](https://abdk4moura.github.io/xats/).
 
 ![two live agent sessions exchanging a message over the xats bus](docs/images/demo.gif)
 
