@@ -76,6 +76,11 @@ async function runDaemon(): Promise<void> {
     host: args.host,
     localDevice: args.localDevice,
     loopbackCompanion: args.loopbackCompanion,
+    // Without this the transport's logger defaults to a no-op, so every MCP
+    // rejection (unknown session, capability no longer bound, orphan reap) was
+    // discarded and a client saw only an empty-body status. stdout reaches the
+    // journal under systemd.
+    mcpLog: (line: string) => console.log(line),
   })
   const companion = started.loopbackCompanion
   wireShutdown(started.app, args.pidPath, {

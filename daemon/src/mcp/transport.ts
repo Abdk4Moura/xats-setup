@@ -284,7 +284,7 @@ export function mountMcp(
       ?? { origin: 'local' as const, remote_addr: null }
     if (!session && !isInit) {
       log(`mcp unknown_session: route=POST method=${body?.method ?? 'unknown'} name=${body?.params?.name ?? 'none'} sid=${sid ?? 'none'} sessions=${sessions.size}`)
-      return sendControlPlaneReject(reply, 404)
+      return sendControlPlaneReject(reply, 404, 'unknown_session')
     }
 
     // The private per-Claude-session capability is added by Claude Code's
@@ -298,32 +298,32 @@ export function mountMcp(
       if (hasToken) {
         const token = args!.xats_bind_token
         delete args!.xats_bind_token
-        if (!opts.claudeBind || originInfo.origin !== 'local') return sendControlPlaneReject(reply, 403)
+        if (!opts.claudeBind || originInfo.origin !== 'local') return sendControlPlaneReject(reply, 403, 'capability_not_bound')
         if (session.capabilityBoundAgentId) {
           if (!opts.claudeBind.owns(session.capabilityBoundAgentId, session.sessionId)) {
-            return sendControlPlaneReject(reply, 403)
+            return sendControlPlaneReject(reply, 403, 'capability_not_bound')
           }
           // Even a bound session may not present a different session's token.
           const binding = opts.claudeBind.bind(token, session.sessionId, session.capabilityBoundAgentId)
           if (!binding) {
-            return sendControlPlaneReject(reply, 403)
+            return sendControlPlaneReject(reply, 403, 'capability_not_bound')
           }
         } else if (session.agentIdHolder.current) {
-          return sendControlPlaneReject(reply, 403)
+          return sendControlPlaneReject(reply, 403, 'capability_not_bound')
         } else {
           const binding = opts.claudeBind.bind(token, session.sessionId)
-          if (!binding) return sendControlPlaneReject(reply, 403)
+          if (!binding) return sendControlPlaneReject(reply, 403, 'capability_not_bound')
           session.bindAgent(binding.agentId, binding.team)
           session.capabilityBoundAgentId = binding.agentId
         }
       } else if (session.capabilityBoundAgentId &&
                  !opts.claudeBind?.owns(session.capabilityBoundAgentId, session.sessionId)) {
-        return sendControlPlaneReject(reply, 403)
+        return sendControlPlaneReject(reply, 403, 'capability_not_bound')
       }
       // Manual register_agent cannot move a capability-bound session into
       // another Claude identity or team.
       if (session.capabilityBoundAgentId && body.params?.name === 'register_agent') {
-        return sendControlPlaneReject(reply, 403)
+        return sendControlPlaneReject(reply, 403, 'capability_not_bound')
       }
     }
 
@@ -335,7 +335,7 @@ export function mountMcp(
       if (authHash !== null) {
         const owner = sessionOwners.get(session.sessionId)
         if (owner && owner !== authHash) {
-          return sendControlPlaneReject(reply, 409)
+          return sendControlPlaneReject(reply, 409, 'control_plane_conflict')
         }
         if (!owner) sessionOwners.set(session.sessionId, authHash)
       }
@@ -348,7 +348,7 @@ export function mountMcp(
       if (typeof claimed === 'string') {
         const current = session.agentIdHolder.current
         if (current === undefined || claimed !== current) {
-          return sendControlPlaneReject(reply, 403)
+          return sendControlPlaneReject(reply, 403, 'capability_not_bound')
         }
       }
     }
@@ -382,7 +382,7 @@ export function mountMcp(
     const session = sid ? sessions.get(sid) : undefined
     if (!session) {
       log(`mcp unknown_session: route=GET sid=${sid ?? 'none'} sessions=${sessions.size}`)
-      return sendControlPlaneReject(reply, 404)
+      return sendControlPlaneReject(reply, 404, 'unknown_session')
     }
     session.lastActivityAt = Date.now()
     await session.transport.handleRequest(req.raw, reply.raw)
@@ -394,7 +394,7 @@ export function mountMcp(
     const session = sid ? sessions.get(sid) : undefined
     if (!session) {
       log(`mcp unknown_session: route=DELETE sid=${sid ?? 'none'} sessions=${sessions.size}`)
-      return sendControlPlaneReject(reply, 404)
+      return sendControlPlaneReject(reply, 404, 'unknown_session')
     }
     session.lastActivityAt = Date.now()
     await session.transport.handleRequest(req.raw, reply.raw)

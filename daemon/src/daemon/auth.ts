@@ -13,6 +13,6 @@ export function makeAuthHook(expected: string | undefined) {
     if (req.url.startsWith('/health')) return
     if (!expected) return
     const got = extractToken(req)
-    if (got !== expected) return sendControlPlaneReject(reply, 401)
+    if (got !== expected) return sendControlPlaneReject(reply, 401, 'peer_not_authorized')
   }
 }
