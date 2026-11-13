@@ -38,10 +38,16 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-          registry-url: "https://registry.npmjs.org"
+          # Node 24 because npm 12 refuses older lines (EBADENGINE), and npm 12 is
+          # the current line for OIDC publishing. No registry-url: it writes an
+          # .npmrc with an empty NODE_AUTH_TOKEN, which fights the OIDC exchange.
+          node-version: "24"
       - name: Use an npm that supports Trusted Publishing (OIDC)
-        run: npm install -g npm@latest
+        run: npm install -g npm@^12.2.0
+      - name: Install build dependencies
+        # prepublishOnly runs build:daemon, which needs esbuild. Without this,
+        # publish fails with code 127 and reads like an auth problem.
+        run: npm ci
       - name: npm publish (Trusted Publishing)
         run: |
           set -euo pipefail
@@ -54,6 +60,6 @@ jobs:
           out=$(npm publish --access public --provenance 2>&1) && { echo "$out"; exit 0; }
           echo "$out"
           if echo "$out" | grep -qiE "cannot publish over|previously published|403 .*cannot publish over"; then
-            echo "::notice::xats-setup@$version already on npm — nothing to do"; exit 0
+            echo "::notice::xats-setup@$version already on npm, nothing to do"; exit 0
           fi
           echo "::error::npm publish failed. Is the Trusted Publisher configured on npmjs.com (package xats-setup, repo Abdk4Moura/xats-setup, workflow publish.yml)?"; exit 1
