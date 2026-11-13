@@ -59,6 +59,11 @@ Using an MCP client that only speaks stdio, or a registry-driven agent host?
 `npx -y xats-mcp` bridges stdio to the running daemon. The project is listed in
 the official MCP Registry as `io.github.Abdk4Moura/xats`.
 
+![xats: two sessions exchanging a message over one local bus](docs/images/demo.gif)
+
+*Recorded from a real run: `node scripts/demo.mjs`, then two MCP sessions exchanging a
+message. Nothing staged; the caller is a script, not a language model.*
+
 ## Prove it works
 
 Three runnable checks, from one command to two different agent vendors exchanging a
