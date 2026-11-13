@@ -1,5 +1,11 @@
 # Cross-Agent Teams
 
+[![ci](https://github.com/Abdk4Moura/xats-setup/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdk4Moura/xats-setup/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/xats-setup?label=xats-setup)](https://www.npmjs.com/package/xats-setup)
+[![npm xats-mcp](https://img.shields.io/npm/v/xats-mcp?label=xats-mcp)](https://www.npmjs.com/package/xats-mcp)
+[![MCP Registry](https://img.shields.io/badge/MCP%20Registry-listed-6f4cff)](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Abdk4Moura%2Fxats)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 One roster and one set of inboxes shared by Claude Code, Codex, OpenCode and Pi.
 A local daemon, no account, and identities that outlive a single session.
 
