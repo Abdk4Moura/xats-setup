@@ -56,7 +56,9 @@ function writeBinding(file: string, sid: string, name: string): void {
   } catch { /* identity still works without persistent bindings */ }
 }
 async function jsonRequest(url: string, init?: RequestInit): Promise<any> {
-  const response = await fetch(url, init)
+  // Every call here goes to the local daemon. A daemon that accepts the socket
+  // and never answers must not pin a caller or a tool invocation forever.
+  const response = await fetch(url, { ...init, signal: (init as any)?.signal ?? AbortSignal.timeout(5_000) })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw Object.assign(new Error(data?.error || `HTTP ${response.status}`), { status: response.status, data })
   return data

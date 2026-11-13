@@ -37,6 +37,20 @@ const XATS_DB = `${os.homedir()}/.cross-agent-teams-mcp/data.db`
 const HEARTBEAT_INTERVAL_MS = 30_000
 const RECEIVE_POLL_MS = 3_000
 
+// Positive integer from the environment, else the default. Used for the boot
+// timings so a test can keep them short without changing production behavior.
+function envMs(key: string, fallback: number): number {
+  const raw = process.env[key]
+  if (!raw) return fallback
+  const n = Number.parseInt(raw, 10)
+  return Number.isFinite(n) && n >= 0 ? n : fallback
+}
+// Registration runs during plugin init, which hosts do before the first paint.
+// Keep each attempt short and bounded, and never let it hold the UI.
+const REGISTER_TIMEOUT_MS = envMs("XATS_REGISTER_TIMEOUT_MS", 2_500)
+const BOOT_ATTEMPTS = envMs("XATS_BOOT_ATTEMPTS", 4)
+const BOOT_RETRY_MS = envMs("XATS_BOOT_RETRY_MS", 1_500)
+
 // Agent kind detection: env primary, runtime fallback, fail-loud default.
 function detectAgentKind(): string {
   // 1. Explicit env var (set by launcher)
@@ -121,6 +135,9 @@ const XatsRegisterPlugin: Plugin = async (input) => {
       const res = await fetch(`${XATS_BASE}/api/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // A daemon that accepts the socket but never answers must not pin the
+        // caller. Boot retries; nothing here is worth waiting indefinitely for.
+        signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS),
         body: JSON.stringify({
           name,
           team,
@@ -216,40 +233,56 @@ const XatsRegisterPlugin: Plugin = async (input) => {
     } catch { /* ignore */ }
   }
 
-  resolveIdentity(await resolveSession())
-  registeredAgentId = await register()
-
-  if (registeredAgentId) {
-    const aid = registeredAgentId
-    heartbeatTimer = setInterval(() => { if (registeredAgentId) void heartbeat(registeredAgentId) }, HEARTBEAT_INTERVAL_MS)
+  // Registration, timers and the receive loop all talk to the local daemon.
+  // Hosts initialise plugins before their first paint, and in opencode that
+  // means awaiting this function blocks the TUI: with the daemon absent or
+  // slow, the user gets an alt-screen that paints nothing. So do the work in
+  // the background and return the tools immediately. Tools handle a null
+  // registeredAgentId already, and boot retries on its own.
+  async function boot(): Promise<void> {
     try {
-      const { Database } = await import("bun:sqlite")
-      db = new Database(XATS_DB, { readonly: true })
-      const row = db.query("SELECT COALESCE(MAX(event_id),0) m FROM messages WHERE to_agent_id = ?").get(aid) as any
-      lastEventId = row?.m ?? 0
-      receiveTimer = setInterval(() => { void pollReceive() }, RECEIVE_POLL_MS)
-    } catch { /* bun:sqlite unavailable -> tools still work, no auto-receive */ }
+      resolveIdentity(await resolveSession())
+      for (let attempt = 0; attempt < BOOT_ATTEMPTS && !registeredAgentId; attempt++) {
+        if (attempt) await new Promise((r) => setTimeout(r, BOOT_RETRY_MS))
+        registeredAgentId = await register()
+      }
 
-    let announced = false
-    const announce = async () => {
-      if (announced) return
-      const sessionID = await resolveSession()
-      if (!sessionID) return
-      announced = true
-      try {
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: { noReply: true, parts: [{ type: "text" as const, text:
-            `<xats-identity>You are on the xats bus as "${name}" (team ${team}, role ${role}, agent_id ${aid}). You are a ${kind} agent: ignore any other identity from ambient docs, and give peers "${name}" as your return address. Message peers with xats_send, list them with xats_agents, read your mail with xats_inbox.</xats-identity>` }] },
-        })
-      } catch { /* ignore */ }
-    }
-    let tries = 0
-    const announceTimer = setInterval(() => {
-      if (announced || tries++ > 10) { clearInterval(announceTimer); return }
-      void announce()
-    }, 3000)
+      if (registeredAgentId) {
+        const aid = registeredAgentId
+        heartbeatTimer = setInterval(() => { if (registeredAgentId) void heartbeat(registeredAgentId) }, HEARTBEAT_INTERVAL_MS)
+        try {
+          const { Database } = await import("bun:sqlite")
+          db = new Database(XATS_DB, { readonly: true })
+          const row = db.query("SELECT COALESCE(MAX(event_id),0) m FROM messages WHERE to_agent_id = ?").get(aid) as any
+          lastEventId = row?.m ?? 0
+          receiveTimer = setInterval(() => { void pollReceive() }, RECEIVE_POLL_MS)
+        } catch { /* bun:sqlite unavailable -> tools still work, no auto-receive */ }
+
+        let announced = false
+        const announce = async () => {
+          if (announced) return
+          const sessionID = await resolveSession()
+          if (!sessionID) return
+          announced = true
+          try {
+            await client.session.promptAsync({
+              path: { id: sessionID },
+              body: { noReply: true, parts: [{ type: "text" as const, text:
+                `<xats-identity>You are on the xats bus as "${name}" (team ${team}, role ${role}, agent_id ${aid}). You are a ${kind} agent: ignore any other identity from ambient docs, and give peers "${name}" as your return address. Message peers with xats_send, list them with xats_agents, read your mail with xats_inbox.</xats-identity>` }] },
+            })
+          } catch { /* ignore */ }
+        }
+        let tries = 0
+        const announceTimer = setInterval(() => {
+          if (announced || tries++ > 10) { clearInterval(announceTimer); return }
+          void announce()
+        }, 3000)
+      }
+    } catch { /* best effort: the tools still work and re-register on demand */ }
   }
+
+  // Deliberately not awaited. Plugin init must return before the host paints.
+  void boot()
 
   // Smart fallback: when bare name fails, discover across mesh and retry
   // INCLUDES shadows - a remote agent IS a shadow, and its device = origin machine
