@@ -1,6 +1,10 @@
 {
   "name": "xats",
+  "displayName": "Cross-Agent Teams",
   "version": "0.1.0",
   "description": "Draws xats cross-agent mail as native Claude Code UI and delivers it with plugin attribution",
-  "author": { "name": "xats" }
+  "author": { "name": "Abdk4Moura", "url": "https://github.com/Abdk4Moura" },
+  "license": "MIT",
+  "homepage": "https://abdk4moura.github.io/xats/",
+  "repository": "https://github.com/Abdk4Moura/xats-setup"
 }
