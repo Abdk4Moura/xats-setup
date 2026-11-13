@@ -141,6 +141,30 @@ jobs:
             | sed -E 's/(eyJ[A-Za-z0-9._-]{20,})/<jwt redacted>/g; s/(_authToken=)[^ ]*/\1<redacted>/g' \
             | head -40
 
+      - name: Publish to the MCP Registry
+        id: registry
+        # Runs when npm now has this version, either because this run published
+        # it or because it already existed. Skips when the registry already
+        # lists the version, since the registry rejects duplicates.
+        if: steps.publish.outcome == 'success' || steps.probe.outputs.exists == 'true'
+        run: |
+          set -uo pipefail
+          ver=$(node -p "require('./package.json').version")
+          listed=$(curl -sS "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.Abdk4Moura/xats" \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const v=(j.servers||[]).map(x=>x.server&&x.server.version);console.log(v.includes(process.argv[1])?"yes":"no")}catch(e){console.log("unknown")}})' "$ver")
+          echo "registry already lists $ver: $listed"
+          if [ "$listed" = "yes" ]; then
+            echo "nothing to publish"; exit 0
+          fi
+          curl -fsSL -o /tmp/mcp-publisher.tgz \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.8.9/mcp-publisher_linux_amd64.tar.gz
+          tar xzf /tmp/mcp-publisher.tgz mcp-publisher
+          ./mcp-publisher login github-oidc
+          if ! ./mcp-publisher publish; then
+            echo "::warning::registry publish failed; npm release is unaffected"
+            exit 1
+          fi
+
       - name: Report
         if: steps.probe.outputs.exists == 'true'
         run: echo "xats-mcp@$(node -p "require('./package.json').version") is already on the registry; nothing to do."
