@@ -1,6 +1,6 @@
 {
   "name": "xats-setup",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "One-command, OS-agnostic installer for Cross-Agent Teams, substantially evolved from earlier xats work, with optional secure direct-peer networking. Windows, macOS, and Linux.",
   "type": "module",
   "repository": {
