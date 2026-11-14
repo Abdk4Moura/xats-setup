@@ -271,8 +271,8 @@ async function handleRegister(ctx: RestCtx, req: FastifyRequest, reply: FastifyR
     throw error
   }
   if (data.bind_mcp) {
-    const bind_token = ctx.claudeBind!.issue(result.agent_id, data.session_key!)
-    return reply.send({ ...result, bind_token })
+    const { token: bind_token, code: bind_code } = ctx.claudeBind!.issue(result.agent_id, data.session_key!)
+    return reply.send({ ...result, bind_token, bind_code })
   }
   return reply.send(result)
 }

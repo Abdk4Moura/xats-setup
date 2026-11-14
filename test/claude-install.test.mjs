@@ -74,14 +74,28 @@ test('MCP entries follow the discovered port, not the 9100 default', async (t) =
   const skill = fs.readFileSync(path.join(paths.claudeDir, 'skills', 'xats', 'SKILL.md'), 'utf8');
   assert.match(skill, /mcp__cross-agent-teams__get_inbox/);
   assert.ok(fs.existsSync(path.join(paths.xatsRoot, 'cc-heartbeat.sh')));
-  assert.ok(fs.existsSync(path.join(paths.xatsRoot, 'xats-bind-hook.mjs')));
+  // The input-rewriting bind hook is retired: auto mode refuses a tool call whose
+  // arguments were rewritten after review. Binding is now the model's own call.
+  assert.ok(!fs.existsSync(path.join(paths.xatsRoot, 'xats-bind-hook.mjs')),
+    'the token-injecting bind hook must not be installed');
   let settings = JSON.parse(fs.readFileSync(paths.claudeSettings, 'utf8'));
-  const bindHooks = settings.hooks.PreToolUse.filter(group =>
+  const bindHooks = (settings.hooks.PreToolUse || []).filter(group =>
     group.hooks?.some(hook => hook.command?.includes('xats-bind-hook.mjs')));
-  assert.equal(bindHooks.length, 1);
-  assert.equal(bindHooks[0].matcher, '^mcp__cross-agent-teams__.*$');
+  assert.equal(bindHooks.length, 0, 'no PreToolUse xats bind hook is wired');
+
+  // An install that still carries the old hook loses it, without touching
+  // unrelated PreToolUse entries.
+  settings.hooks.PreToolUse = [
+    { matcher: 'Bash', hooks: [{ type: 'command', command: '/usr/bin/true' }] },
+    { matcher: '^mcp__cross-agent-teams__.*$', hooks: [{ type: 'command', command: 'node /home/u/.xats/xats-bind-hook.mjs' }] },
+  ];
+  fs.writeFileSync(paths.claudeSettings, JSON.stringify(settings, null, 2));
+  fs.writeFileSync(path.join(paths.xatsRoot, 'xats-bind-hook.mjs'), '// stale');
   installClaude(paths, { baseUrl: 'http://127.0.0.1:9102' });
   settings = JSON.parse(fs.readFileSync(paths.claudeSettings, 'utf8'));
-  assert.equal(settings.hooks.PreToolUse.filter(group =>
-    group.hooks?.some(hook => hook.command?.includes('xats-bind-hook.mjs'))).length, 1);
+  assert.equal((settings.hooks.PreToolUse || []).filter(group =>
+    group.hooks?.some(hook => hook.command?.includes('xats-bind-hook.mjs'))).length, 0);
+  assert.ok((settings.hooks.PreToolUse || []).some(group =>
+    group.hooks?.some(hook => hook.command === '/usr/bin/true')), 'user hooks are preserved');
+  assert.ok(!fs.existsSync(path.join(paths.xatsRoot, 'xats-bind-hook.mjs')), 'stale file removed');
 });

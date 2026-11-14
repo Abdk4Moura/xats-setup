@@ -163,6 +163,25 @@ async function start() {
   if (resp && typeof resp.name === 'string' && resp.name) {
     try { fs.writeFileSync(idFileFor(`${id.tag}.name`), resp.name, { mode: 0o600 }); } catch { /* ignore */ }
   }
+
+  // The bind code is the way this session claims the MCP connection WITHOUT a
+  // PreToolUse hook rewriting tool input: Claude Code's auto mode refuses a call
+  // whose arguments changed after review, so the model passes the code itself.
+  // It is single use and short lived, not a durable secret.
+  const code = typeof resp.bind_code === 'string' ? resp.bind_code.trim() : '';
+  if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(code)) {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'SessionStart',
+        additionalContext: [
+          '<xats-session>',
+          `You are registered on the xats (cross-agent-teams) bus as "${resp.name ?? id.name}"${resp.team ? ` on team ${resp.team}` : ''}.`,
+          `If any xats tool reports unknown_agent, call xats_bind with code ${code} once. The code is single use, expires in 15 minutes, and is never something to ask the user for.`,
+          '</xats-session>',
+        ].join('\n'),
+      },
+    }));
+  }
 }
 
 async function end() {

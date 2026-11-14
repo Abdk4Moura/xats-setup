@@ -37,6 +37,7 @@ import {
 import { autoBindCodexPane } from './auto-bind-codex-pane.js'
 import type { SessionOriginInfo } from '../daemon/network-origin.js'
 import type { DaemonContext } from '../daemon/server.js'
+import type { ClaudeBindCapabilities } from './claude-bind.js'
 
 export interface AgentIdHolder { current: string | undefined }
 
@@ -51,6 +52,12 @@ const deliverySchema = z.object({
 }).passthrough()
 
 const agentTypeSchema = z.enum(['codex', 'claude-code', 'opencode', 'custom'])
+
+// Short, model-typed bind code. Formatting is tolerated: the daemon strips
+// separators and uppercases before hashing.
+const xatsBindInputSchema = z.object({
+  code: z.string().min(4).max(32).describe('Bind code from the xats context block, for example "K7QM-2XPD"'),
+})
 
 const detectTmuxPaneSchema = z.object({
   agent: z.enum(['codex', 'claude-code', 'opencode', 'custom']),
@@ -251,7 +258,8 @@ export function registerBusinessTools(
   getSessionOriginInfo?: () => SessionOriginInfo | undefined,
   context?: DaemonContext,
   onUnregisterSuccess?: UnregisterSuccessHook,
-  injectedRegisterSvc?: RegisterAgentService
+  injectedRegisterSvc?: RegisterAgentService,
+  claudeBind?: ClaudeBindCapabilities
 ): void {
   const agents = new AgentsRepo(db)
   const events = new EventsOutbox(db)
@@ -704,6 +712,39 @@ export function registerBusinessTools(
   }
 
   // pre_register_codex_pane — callable by launchers before any agent row exists
+  server.registerTool(
+    'xats_bind',
+    {
+      title: 'Bind this session to an xats identity',
+      description: [
+        'Bind this MCP session to the Claude Code identity that the xats SessionStart hook already registered for you.',
+        'Call it once per session, before or after other xats tools, when they report unknown_agent.',
+        'Pass the bind code from the xats context block (a value like "K7QM-2XPD"). Codes are single use and expire after 15 minutes.',
+        'Never ask the user for the code and never invent one: it is provided in the injected context, and registration on the daemon already happened.',
+        'If no code is available, use register_agent instead, which binds the session the same way.'
+      ].join(' '),
+      inputSchema: xatsBindInputSchema,
+    },
+    async (args: { code: string }) => {
+      const sid = getSessionId?.()
+      const bind = claudeBind
+      if (!sid) {
+        return { content: [{ type: 'text' as const, text: 'xats_bind failed: no MCP session on this request' }] }
+      }
+      if (!bind) {
+        return { content: [{ type: 'text' as const, text: 'xats_bind failed: capability binding is not available on this daemon' }] }
+      }
+      const binding = bind.bindCode(args.code, sid)
+      if (!binding) {
+        return { content: [{ type: 'text' as const, text: 'xats_bind failed: code invalid, expired or already used. Re-run the xats installer or use register_agent.' }] }
+      }
+      onRegisterSuccess?.(binding.agentId, binding.team)
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, agent_id: binding.agentId, team: binding.team }) }],
+      }
+    }
+  )
+
   server.registerTool(
     'pre_register_codex_pane',
     {

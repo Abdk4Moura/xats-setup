@@ -134,3 +134,34 @@ test('Claude first MCP call binds exactly its hook identity; resumes keep mailbo
     } finally { await client.close() }
   }, { AGENT_TTL_MS: '100', AGENT_REAP_INTERVAL_MS: '50' })
 })
+
+// The bind code exists so the MODEL can claim the session with an ordinary tool
+// call. A PreToolUse hook that rewrote tool arguments to inject the token made
+// Claude Code's auto mode refuse every xats call, because the executed call no
+// longer matched what was reviewed.
+test('xats_bind claims a session with a short code, which is then spent', { timeout: 90000, skip: !deps || !fs.existsSync(cli) }, async () => {
+  await fixture(async base => {
+    const a = await post(base, '/api/register', { name: 'claude-code', team: 'default', agent_type: 'claude-code', session_key: 'session-code', bind_mcp: true })
+    assert.equal(a.status, 200)
+    assert.match(a.data.bind_code, /^[A-Z0-9]{4}-[A-Z0-9]{4}$/)
+
+    const claimer = await mcpClient(base)
+    const bystander = await mcpClient(base)
+    try {
+      assert.equal(output(await claimer.client.callTool({ name: 'get_inbox', arguments: {} })).error, 'unknown_agent')
+
+      // Typing the code loosely must still work: case and separators are ignored.
+      const ok = output(await claimer.client.callTool({ name: 'xats_bind', arguments: { code: a.data.bind_code.toLowerCase() } }))
+      assert.equal(ok.ok, true)
+      assert.equal(ok.agent_id, a.data.agent_id)
+      assert.equal(output(await claimer.client.callTool({ name: 'get_inbox', arguments: {} })).error, undefined)
+
+      // Single use: a second session cannot replay the same code.
+      const replay = await bystander.client.callTool({ name: 'xats_bind', arguments: { code: a.data.bind_code } })
+      assert.match(replay.content[0].text, /not_?bound|xats_bind failed/i)
+      assert.equal(output(await bystander.client.callTool({ name: 'get_inbox', arguments: {} })).error, 'unknown_agent')
+    } finally {
+      await Promise.allSettled([claimer.close(), bystander.close()])
+    }
+  })
+})

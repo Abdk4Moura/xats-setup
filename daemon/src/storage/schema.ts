@@ -43,7 +43,9 @@ const DDL = [
     agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
     session_key TEXT NOT NULL,
     issued_at TEXT NOT NULL,
-    revoked_at TEXT
+    revoked_at TEXT,
+    code_hash TEXT,
+    code_expires_at TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_claude_bind_capabilities_agent_id ON claude_bind_capabilities(agent_id)`,
   `CREATE TABLE IF NOT EXISTS messages (
@@ -273,4 +275,17 @@ export function applySchema(
   migrateAgentsDeviceColumns(db, opts.localDevice ?? 'local')
   migrateMessagesNeedReplyColumn(db)
   migrateAgentsCursorWatermark(db)
+  migrateClaudeBindCodeColumns(db)
+}
+
+// The bind code lets the MODEL claim a session (a tool call it authored, which
+// auto mode can review) instead of a hook rewriting tool input, which auto mode
+// refuses. Older databases predate the two columns.
+function migrateClaudeBindCodeColumns(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare('PRAGMA table_info(claude_bind_capabilities)').all() as { name: string }[]).map((c) => c.name),
+  )
+  if (!cols.has('code_hash')) db.exec('ALTER TABLE claude_bind_capabilities ADD COLUMN code_hash TEXT')
+  if (!cols.has('code_expires_at')) db.exec('ALTER TABLE claude_bind_capabilities ADD COLUMN code_expires_at TEXT')
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_claude_bind_code_hash ON claude_bind_capabilities(code_hash) WHERE code_hash IS NOT NULL')
 }
