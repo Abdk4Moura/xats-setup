@@ -138,6 +138,54 @@ function clip(text, max) {
   return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1).trimEnd()}…`;
 }
 
+// Hand a message to the person in their own words. A mod cannot write into
+// the composer, and submitting as the user would fake authorship, so this
+// prints the body and drops a copy in a file they can paste from. It never
+// sends anything.
+async function copyCommand($, e) {
+  const args = String(e?.args ?? "").trim().split(/\s+/).filter(Boolean);
+  const want = args[0] ?? "";
+  const pool = pending.length > 0 ? pending : recent;
+  if (pool.length === 0) {
+    return { text: "xats copy: nothing to copy. The inbox is empty." };
+  }
+  let pick;
+  if (/^last$/i.test(want)) {
+    pick = pool[pool.length - 1];
+  } else if (/^\d+$/.test(want)) {
+    const index = Math.min(pool.length, Math.max(1, Number(want))) - 1;
+    pick = pool[index];
+  } else {
+    pick = pool[0];
+  }
+
+  const body = String(pick.body ?? "");
+  const eventId = Number(pick.event_id);
+  const header = `from ${pick.from_name || "unknown"}${pick.subject ? ` \u00b7 ${pick.subject}` : ""}${Number.isSafeInteger(eventId) ? ` \u00b7 #${eventId}` : ""}`;
+
+  let saved = "not saved";
+  try {
+    const home = (await $.env.get("HOME")) || (await $.env.get("USERPROFILE")) || "";
+    const dir = `${home}/.xats/clip`;
+    const file = `${dir}/xats-${Number.isSafeInteger(eventId) ? eventId : Date.now()}.txt`;
+    await $.fs.write(file, body.endsWith("\n") ? body : `${body}\n`);
+    saved = file;
+  } catch (error) {
+    saved = `not saved (${error && error.message ? error.message : error})`;
+  }
+
+  return {
+    text: [
+      `xats copy  ${header}`,
+      "",
+      body,
+      "",
+      `saved: ${saved}`,
+      "Sending is yours: paste it into the composer if you want it in your own words.",
+    ].join("\n"),
+  };
+}
+
 function summaryLine(message) {
   const subject = message.subject ? `: ${message.subject}` : "";
   const eventId = Number(message.event_id);
@@ -393,6 +441,7 @@ export function register(on, options) {
     for (const [name, description] of [
       ["xats-status", "Show xats bus status for this session"],
       ["xats-inbox", "Open the xats inbox"],
+      ["xats-copy", "Copy an xats message so you can send it yourself"],
     ]) {
       try {
         await $.command.register({ name, description, immediate: true });
@@ -530,6 +579,8 @@ export function register(on, options) {
     return Box({ flexDirection: "column", columnGap: 1, children: [header, ...rows] });
   });
 
+  on("command.run", { command: "xats-copy" }, copyCommand);
+
   // Diagnostics as a transcript line, so a person can see why nothing draws.
   on("command.run", { command: "xats-status" }, async ($) => ({
     text: [
@@ -563,6 +614,7 @@ export const __internals = {
   poll,
   deliver,
   bandText,
+  copyCommand,
   state: () => ({
     agentId,
     agentName,
