@@ -76,16 +76,21 @@ test('detects OpenCode v2 when PATH cannot see the binary', async (t) => {
 
   const { resolveOpenCodeVersion } = await import('../lib/harness.mjs');
   const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
   const savedPath = process.env.PATH;
   const savedForce = process.env.XATS_OPENCODE_V2;
   t.after(() => {
     process.env.HOME = savedHome;
+    if (savedProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedProfile;
     process.env.PATH = savedPath;
     if (savedForce === undefined) delete process.env.XATS_OPENCODE_V2;
     else process.env.XATS_OPENCODE_V2 = savedForce;
   });
 
   process.env.HOME = home;
+  // os.homedir() on Windows reads USERPROFILE and ignores HOME.
+  process.env.USERPROFILE = home;
   process.env.PATH = '/nonexistent-bin';
   delete process.env.XATS_OPENCODE_V2;
 
@@ -128,4 +133,21 @@ test('reports unset instead of pretending v1 when nothing is found', async (t) =
   process.env.PATH = '/nonexistent-bin';
   delete process.env.XATS_OPENCODE_V2;
   assert.equal(resolveOpenCodeVersion().source, 'unset');
+});
+
+test('opencode lookup directories follow the home env, on every platform', async () => {
+  const { opencodeDirCandidates } = await import('../lib/harness.mjs');
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  try {
+    process.env.HOME = '/fake/home';
+    process.env.USERPROFILE = '/fake/profile';
+    const dirs = opencodeDirCandidates();
+    const expected = process.platform === 'win32'
+      ? path.join('/fake/profile', '.opencode', 'bin')
+      : path.join('/fake/home', '.opencode', 'bin');
+    assert.ok(dirs.includes(expected), `expected ${expected} in ${JSON.stringify(dirs)}`);
+  } finally {
+    if (saved.HOME === undefined) delete process.env.HOME; else process.env.HOME = saved.HOME;
+    if (saved.USERPROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = saved.USERPROFILE;
+  }
 });
