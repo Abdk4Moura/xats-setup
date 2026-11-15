@@ -53,9 +53,16 @@ test('preserves the legacy plugin key for OpenCode v1 and Mimocode', (t) => {
 // PATH lacks ~/.opencode/bin, so `which opencode` failed and a v2 host silently
 // got the legacy v1 adapter. Detection must look at the usual install dirs, and
 // must say so out loud when it still cannot tell.
+// Windows resolves opencode.cmd/.exe, POSIX resolves the plain name, so the
+// fixture must provide whichever this platform would actually find.
 function fakeOpencode(root, versionLine) {
   const bin = path.join(root, '.opencode', 'bin');
   fs.mkdirSync(bin, { recursive: true });
+  if (process.platform === 'win32') {
+    const exe = path.join(bin, 'opencode.cmd');
+    fs.writeFileSync(exe, `@echo off\r\necho ${versionLine}\r\n`);
+    return exe;
+  }
   const exe = path.join(bin, 'opencode');
   fs.writeFileSync(exe, `#!/bin/sh\necho "${versionLine}"\n`);
   fs.chmodSync(exe, 0o755);
