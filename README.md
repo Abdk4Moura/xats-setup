@@ -10,248 +10,113 @@
 One roster and one set of inboxes shared by Claude Code, Codex, OpenCode and Pi.
 A local daemon, no account, and identities that outlive a single session.
 
-Cross-Agent Teams (`cross-agent-teams`) is a substantially evolved implementation
-built on the earlier xats work: a new release with major changes to the daemon,
-agent integrations, per-session identity, and optional direct-peer transport. It
-is not the same as the pre-existing xats project.
-
 ## Why this exists
 
-Every host now ships some form of agent coordination inside its own walls. Claude
-Code's agent teams give one session a lead, teammates, a shared task list and
-mailboxes, and its documentation scopes that to a single session: one team per
-session, teammates not restored by `/resume`, and no sharing of a team across
-sessions. That is a good design for work inside one tool.
+Every host now ships some form of agent coordination inside its own walls, and
+all of it stops at the vendor boundary. A Claude Code session cannot address a
+Codex or Pi session.
 
-It cannot cross a vendor boundary. A Claude Code session has no way to address a
-Codex or Pi session, and Anthropic has no reason to build one. That gap is what
-this project fills: the same roster, the same inboxes, the same message history,
-regardless of which agent you are running, plus identities that persist after a
-session ends so a resumed agent keeps its address and its unread mail.
+This project fills that gap. The roster, the inboxes and the message history are
+shared across hosts, and an identity persists after a session ends, so a resumed
+agent keeps its address and its unread mail.
 
-If you only ever use one agent, the built-in feature is the lower friction choice
-and you probably do not need this.
+If you only ever use one agent, your host's built-in feature is the lower
+friction choice and you probably do not need this.
 
 ## Install
-
-Windows, macOS, or Linux, with the existing npm installer/package name
-`xats-setup`:
 
 ```sh
 npx xats-setup
 ```
 
-If you use Claude Code and want the native mail drawing, install the plugin from
-this repository's marketplace in one step (Claude Code 2.1.275 or later, while
-the npm installer still handles the daemon and the other hosts):
+That is the whole install. It is idempotent, needs no sudo, installs under
+`~/.xats`, and requires Node 20 or newer.
+
+Claude Code users can also install the plugin, which draws mail as native UI:
 
 ```
 /plugin install xats --marketplace Abdk4Moura/xats-setup
 ```
 
-The local daemon starts at login. The optional peer runtime can be installed,
-but its network listener stays off until you explicitly enable it.
+For a stdio-only MCP client, `npx -y xats-mcp` bridges stdio to the running
+daemon. The listing in the official MCP Registry is `io.github.Abdk4Moura/xats`.
 
-That's the whole install. It is **idempotent** (safe to re-run) and needs **no
-sudo** (everything lands under `~/.xats`). The only prerequisite is **Node ≥ 20**
-(Node 22 LTS strongly recommended, see Native deps below).
-
-Using an MCP client that only speaks stdio, or a registry-driven agent host?
-`npx -y xats-mcp` bridges stdio to the running daemon. The project is listed in
-the official MCP Registry as `io.github.Abdk4Moura/xats`.
-
-The same walkthrough with the demo is at
-[abdk4moura.github.io/xats](https://abdk4moura.github.io/xats/).
-
-![two live agent sessions exchanging a message over the xats bus](docs/images/demo.gif)
-
-*Two real sessions, a pi agent on the left and Claude Code on the right, coordinating over the
-local bus. Not a mockup and not scripted: the pi agent called `xats_agents`, sent with
-`xats_send`, Claude received it through the plugin, and the round trip closed in seconds.
-Idle time is compressed for playback; nothing is staged.*
+Flags, the interactive picker, upgrades, reset, and Windows or WSL notes are in
+[docs/installation.md](docs/installation.md).
 
 ## Prove it works
 
-Three runnable checks, from one command to two different agent vendors exchanging a
-message, with the output observed on a real machine: [docs/prove-it-works.md](docs/prove-it-works.md).
+Three runnable checks on your own machine, from one command to two different
+agent vendors exchanging a message, with real output:
+[docs/prove-it-works.md](docs/prove-it-works.md).
 
 ```sh
 npx xats-setup --only=daemon,service
 node scripts/demo.mjs
 ```
 
+The same walkthrough with the demo is at
+[abdk4moura.github.io/xats](https://abdk4moura.github.io/xats/).
+
+![two live agent sessions exchanging a message over the xats bus](docs/images/demo.gif)
+
+*Two real sessions, a pi agent on the left and Claude Code on the right,
+coordinating over the local bus. Not a mockup and not scripted. Idle time is
+compressed for playback; nothing is staged.*
+
 ## What it does
 
 | Component | Result |
 |---|---|
-| `daemon`  | Builds the owned daemon in `daemon/src`, installs its platform-specific runtime dependencies under `~/.xats/daemon`, then places the built CLI at the legacy-compatible `cross-agent-teams-mcp` path. The runtime does not install or patch the upstream daemon package. |
-| `service` | Runs the daemon at login/boot: **systemd** (Linux, `--user` + linger, or system unit as root), **launchd** (macOS LaunchAgent), **Scheduled Task** (Windows, ONLOGON). Also starts it immediately. |
-| `claude`  | Claude Code SessionStart/SessionEnd hooks, session-specific MCP binding, the `cross-agent-teams` MCP server, and a Claude skill, plus the native mod band and `/xats` inbox pane. Mail reaches Claude as a plugin-attributed prompt, not text presented as user-typed. The legacy channel proxy is retired. |
-| `codex`   | Codex CLI SessionStart/UserPromptSubmit/SessionEnd hooks + `cross-agent-teams` MCP entry + xats skill. Codex has no plugin UI surface, so mail reaches the model as **developer context** on its next turn (`additionalContext`) and a needs-reply nudge shows as a native UI line (`systemMessage`). Nothing is typed into the composer, and no turn is injected. |
-| `pi`      | Pi extension (`~/.pi/agent/extensions/xats.ts`) + xats skill. Polls inbox and sends a themed `xats-inbox` card (a custom message, not a user message) that starts/queues a turn. |
-| `omp`     | OMP extension and skill are included; loading has not yet been verified against OMP, so treat this integration as experimental. |
-| `opencode`| `xats-register` plugin + xats skill, plus the **xats TUI plugin** (`✦ n` badge in the prompt footer and a `/xats` panel). The installer selects the native per-session OpenCode v2 plugin API when it detects v2; v1 keeps the legacy adapter. |
-| `mimocode`| Legacy `xats-register` plugin + xats skill for Mimocode. |
-| `harness` | Deprecated alias for `opencode,mimocode,pi` (kept for compat). |
-| `bridge`  | Installs the legacy Node bridge (`~/.xats/bridge/bridge.mjs`). Joining its Filament mesh is a separate coordinated step. |
-| `peer`    | Installs Stage 1 direct-network HTTPS peer service and mDNS discovery. Network listening remains off until explicitly enabled. |
+| `daemon`  | The owned daemon, with its runtime dependencies under `~/.xats/daemon` |
+| `service` | Starts the daemon at login or boot (systemd, launchd, Scheduled Task) |
+| `claude`  | SessionStart and SessionEnd hooks, MCP entry, skill, native status band and `/xats` pane |
+| `codex`   | Hooks plus MCP entry and skill; mail arrives as developer context on the next turn |
+| `pi`      | Extension and skill that draw a themed `xats-inbox` card |
+| `opencode`| Plugin, skill and a TUI badge with a `/xats` panel; the v2 API is selected when detected |
+| `mimocode`| Legacy plugin and skill |
+| `peer`    | Stage 1 direct HTTPS peering and mDNS discovery, listener off until enabled |
+| `bridge`  | Legacy Node bridge for the Filament mesh, joined as a separate step |
+| `omp`     | Included, loading not yet verified: treat as experimental |
 
-## Usage
+Mail is never presented as something you typed. Each host draws it natively, and
+the model receives it as plugin-attributed content rather than as your words. The
+per-host details are in [docs/hosts.md](docs/hosts.md).
 
-```sh
-npx xats-setup                 # interactive: press Enter for all components, or c to pick agents
-npx xats-setup --yes           # non-interactive full install (CI / scripts); peer listener remains off
-npx xats-setup --dry-run       # preview every action, change nothing
-npx xats-setup --only=daemon,service,pi   # just Pi on this box (no prompt)
-npx xats-setup --only=peer               # install the Stage 1 peer runtime only
-npx xats-setup --only=pi       # only Pi's extension+skill (needs a running daemon elsewhere)
-npx xats-setup --only=omp      # only OMP's extension+skill
-npx xats-setup --without claude,pi  # generic verb: exclude any list (aliases: --except/--exclude/--skip/--omit)
-npx xats-setup --without=bridge       # same as --no-bridge, no endless --no-* flags
-npx xats-setup --no-claude            # single-component shorthand still works
-npx xats-setup --label umar    # prefix for this box's agent identities
-npx xats-setup --force         # reinstall the daemon base package
-npx xats-setup reset           # remove everything xats-setup installed
-npx xats-setup reset --only=pi # remove only Pi's bits
-```
+**Identity is per session, not per box.** Two OpenCode tabs in the same directory
+get distinct identities and inboxes. Pin a prefix with `XATS_NAME`, or claim a
+name at runtime with `xats_claim_name`. The daemon is the authority: it
+disambiguates a colliding name and refuses an exact claim that a live agent holds.
 
-Each agent (`claude`, `pi`, `omp`, `opencode`, `mimocode`) is optional, and the default is **all**, since most people want cross-agent talk. Pick any subset with `--only=` or `--without`/`--except`. `omp` is independent of `pi` (same `xats.ts` works for both, installed to `~/.pi` vs `~/.omp`).
+## Limits
 
-**Ephemeral loader + log:** in a TTY the installer shows a single-line loader (`⠋ current step, log /tmp/xats-setup-…log`) that disappears on finish; all detail goes to `$(os.tmpdir())/xats-setup-*.log`. Final summary is clean and prints `Log: /tmp/…`, with `cat` for verbose output. Use `--verbose`/`--no-ephemeral` to stream live logs instead.
+Stated plainly, because they matter more than the feature list:
 
-**Interactive:** `npx xats-setup` with no flags in a TTY opens a picker: `Enter`=all, `c`=toggle each `Y/n` (shows `found/not found`), `n`=none, `q`=quit. Use `--yes`/`--only`/`--without` to skip (CI, scripts, re-runs). The picker is skipped when `CI=1` or stdin is piped.
+- The daemon binds loopback only. Peering is a separate service, and its listener
+  stays off until you enable it.
+- Stage 1 peering is direct transport authentication, not signed per-message
+  envelopes or internet federation. It cannot traverse a firewall or NAT that
+  blocks direct IP connectivity.
+- Codex has no render API, so it gets no badge and mail arrives on its next turn
+  rather than interrupting the current one.
+- OMP support is unverified.
+- This is a new project with a single maintainer. The demo, the tests and the CI
+  are real; the age is not.
 
-After install, restart Claude Code / Pi (`/reload` in Pi) / OpenCode so they register on the bus. Claude's PreToolUse hook adds a private session capability to its own xats MCP calls; it does not identify a session by PID or name.
+The longer version, including the security posture, is in
+[docs/limits.md](docs/limits.md) and [docs/SECURITY.md](docs/SECURITY.md).
 
-**Inbox mail is never dressed up as something you typed.** Each host draws it natively instead:
+## Docs
 
-| Host | How it looks | How Claude/the model gets it |
-|---|---|---|
-| Claude Code | status line above the prompt (`✦ xats · 2 notices · 1 needs reply`) and a `/xats` pane | `$.prompt.submit` → rendered as `Prompt from the xats plugin` |
-| Pi / OMP | themed card (`✉ xats inbox`, sender rows, `ctrl+o` expands) | custom message (`customType: xats-inbox`), not a user message |
-| OpenCode v2 | `✦ n` in the prompt footer and a `/xats` panel | `session.synthetic` with a `xats inbox` label |
-| Codex | no badge: Codex has no render API and `tui.status_line` only takes built-in ids | `additionalContext` on `UserPromptSubmit` (developer context), `systemMessage` for needs-reply |
-| OpenCode v1 / Mimocode | plain transcript notice | `promptAsync` (v1 has no synthetic message type) |
+| Document | Contents |
+|---|---|
+| [docs/installation.md](docs/installation.md) | All flags, picker, upgrade, reset, Windows and WSL |
+| [docs/prove-it-works.md](docs/prove-it-works.md) | Two runnable proofs, with real output |
+| [docs/hosts.md](docs/hosts.md) | How each host draws mail and delivers it to the model |
+| [docs/limits.md](docs/limits.md) | What it does not do, and why |
+| [docs/stage1-networking.md](docs/stage1-networking.md) | Direct peer transport in depth |
+| [docs/SECURITY.md](docs/SECURITY.md) | Threat model and reporting |
 
-Claude Code does not receive peer mail as keystrokes in its composer. The mod submits a plugin-attributed prompt; a notice arriving during an active turn is queued for Claude Code rather than forcibly interrupting an in-flight tool operation. If no host wake transport is available, the message remains in the inbox for the `get_inbox` MCP tool.
+## License
 
-The OpenCode and Claude integrations use session-specific identity in the owned daemon. Update with `npx xats-setup` after pulling a newer release so the daemon and hooks are upgraded together.
-
-**Identity is per session, not per box.** The Pi/OMP extensions and OpenCode v2 plugin register each session as `<kind>-<host>-<label>-<session8>`, where `label` (`~/.xats/label`, `XATS_LABEL`, or `--label`) is only a human-readable prefix and `session8` is derived from the session id. Two OpenCode v2 tabs in the same location therefore have distinct identities and inboxes. OpenCode v1 and Mimocode retain the legacy adapter.
-
-To pin a stable identity prefix, set `XATS_NAME` (e.g. `XATS_NAME=lend-gpu-worker`); OpenCode v2 appends a session suffix so separate tabs remain addressable. An agent can also claim a name at runtime with `xats_claim_name`; that binding is scoped to the session, so it returns on resume but a brand-new session starts from the computed default. The daemon is the authority: it disambiguates a colliding preferred name with a `-2` suffix and refuses an exact claim that a live agent already holds.
-Health check: `curl http://127.0.0.1:$(cat ~/.xats/port 2>/dev/null || echo 9100)/health`. Setup also runs an ephemeral bus probe (`register → list → deregister`) and verifies each selected component’s files.
-
-## Stage 1 direct peer networking
-
-Stage 1 connects Cross-Agent Teams instances directly over HTTPS. Paired-peer requests carry Ed25519 signatures and use pinned TLS certificates; timestamps and nonces limit replay. mDNS/DNS-SD discovers candidates only, and routed peers use a short-lived invite shared out of band. This is direct transport authentication, not signed per-message envelopes, recipient-sealed relay, or internet federation. Stage 1 does not use Filament/Tunlion and cannot bypass a firewall/NAT that prevents direct IP connectivity. The local daemon remains bound to loopback; only the separate peer service listens on network interfaces.
-
-Installation alone does not open a listener. Agent roster and message federation also require the local xats daemon to be installed and running (the default full install includes it). Start the peer listener in the foreground:
-
-```sh
-xats-setup peer run
-```
-
-Or explicitly opt in to a user service that starts now and at login (systemd user service, macOS LaunchAgent, or Windows Scheduled Task):
-
-```sh
-xats-setup peer enable
-xats-setup peer status
-xats-setup peer stop
-xats-setup peer start
-xats-setup peer restart
-xats-setup peer disable    # stop and remove autostart/firewall rule
-```
-
-The peer listener binds all interfaces by default and selects a stable port from TCP 9110 to 9120. Review `xats-setup peer status` for addresses; if multiple are listed, choose the address the other machine can reach. `peer enable` is the explicit network-exposure action. On Windows it best-effort adds a firewall allow rule for the saved peer port (or the default 9110 to 9120 range on first launch). No daemon HTTP/MCP API is exposed.
-
-For LAN discovery, run the service on both machines, then:
-
-```sh
-xats-setup peer candidates
-xats-setup peer pair <candidate-device-id>   # sends a request; this is not trust
-xats-setup peer pending                      # on the other machine
-xats-setup peer approve <pending-id> --label laptop
-# or: xats-setup peer deny <pending-id>
-```
-
-For a routed/directly reachable peer, create an expiring invite on the inviter (after choosing its reachable address):
-
-```sh
-xats-setup peer invite --endpoint https://<reachable-address>:<port> --out ./xats-peer.invite
-```
-
-Transfer that owner-only file privately. On the joining machine, with its peer service already running:
-
-```sh
-xats-setup peer pair --invite-file ./xats-peer.invite --endpoint https://<joining-address>:<port>
-```
-
-The inviter must explicitly approve the pending request. Invite files are credentials: do not commit or log them, transfer them privately, and delete them after use. Paired instances retain pinned identities. Use `xats-setup peer peers` and `xats-setup peer revoke <device-id>` to manage local trust. Paired rosters appear as namespaced `xpeer_…` shadow agents, and messages are forwarded over the direct authenticated HTTPS connection. Revocation removes the local trust record and stops federation from this instance; it is not a permanent denylist, and a new pairing can be approved later. Saved `shared`/`open` approval settings are not enforced by the current runtime; all new peers still require manual approval.
-
-Resetting with `npx xats-setup reset --only=peer` disables the peer service, removes its identity/trust state, and purges local peer shadow agents when the daemon is available. The legacy bridge below is separate and still requires Filament.
-
-## Windows ↔ WSL
-Windows and WSL are separate loopback buses (`C:\Users\…\.xats` vs `~/.xats` in the distro). Setup detects `wsl.exe` + `~/.config/opencode` inside the distro and prints `WSL has opencode` guidance. For Stage 1 direct networking, install/start the peer component on both sides and use an address reachable from the other side; WSL NAT/firewall rules may prevent direct access, in which case Stage 1 does not tunnel around them. For legacy mesh bridging, run `wsl -- npx xats-setup --only=opencode,pi,daemon,service` inside WSL, configure `~/.xats/bridge/peers.json` on each side, then `bridge up` (requires `filament` on both). On Windows the daemon installer picks a free port `9100-9104` (persists to `~/.xats/port`); `service` uses that port for the daemon Scheduled Task. First daemon bind may trigger Windows Firewall.
-
-## Reset / uninstall
-
-```sh
-npx xats-setup reset
-# preview only:
-npx xats-setup reset --dry-run
-```
-
-Reset stops and unregisters the xats daemon and peer services (if selected), removes `~/.xats` (or just the selected component state for component-only resets), removes
-xats's Claude hook/MCP entry, its OpenCode/mimocode plugin entries and copied
-files, and Pi's `~/.pi/agent/extensions/xats.ts` plus xats skill, only for the selected components (`reset --only=pi` touches just Pi). It deliberately
-leaves unrelated harness settings, plugins, skills, and MCP servers intact.
-
-## Updating
-
-Re-run the same command; it's an in-place update:
-
-```sh
-npx xats-setup@latest
-```
-
-It records what it installed in `~/.xats/manifest.json`, so a re-run **detects a
-prior version and migrates it**: overwrites the daemon build, peer runtime, hook, and plugins
-with the current ones, and restarts the daemon or explicitly enabled peer service
-when its runtime changed. A fresh peer install never starts a listener. Same-version
-re-runs are an idempotent refresh.
-
-Agents that stop heartbeating are considered offline after about 3 minutes and are normally reaped shortly thereafter. Claude sends a heartbeat every 30 seconds. Session-keyed Claude mailbox rows are retained offline for up to 30 days so a resumed Claude session can keep its agent ID and receive mail sent during the gap. Restart your Claude session after an update so it picks up new hooks.
-
-## Bringing the bridge onto the mesh
-
-```sh
-# edit ~/.xats/bridge/peers.json to add the remote peer, then:
-node ~/.xats/bridge/bridge.mjs up      # up | down | status
-```
-
-The bridge tunnels over `filament forward`, so the `filament` CLI must be on the
-box. Full function wants **Node ≥ 22.5** (the bridge reads the daemon's WAL
-SQLite via the built-in `node:sqlite`; Node 20/21 fall back to the `sqlite3` CLI
-if present, else degrade to empty reads).
-
-## Native deps / Node version
-
-The daemon's only native dependency is `better-sqlite3`. Its prebuilt binaries
-cover Win/Mac/Linux (x64 + arm64) on **Node 22/24/25/26**, but the current 12.x
-line **dropped Node-20 prebuilds**, so installing under Node 20 compiles from
-source (needs a C++ toolchain). The installer detects this and pins
-`better-sqlite3@12.9.0` (last with a Node-20 prebuild) automatically, but **Node
-22 LTS is the clean path everywhere**. The native binary is ABI-locked to the
-Node major it is installed under; the service runs the daemon with that same
-Node, so install-node == run-node by construction.
-
-## Install without publishing (tarball)
-
-Until it's on npm, install from the packed tarball (works the same on every OS):
-
-```sh
-npm i -g ./xats-setup-0.3.7.tgz && xats-setup
-# or, no global install:
-npx ./xats-setup-0.3.7.tgz
-```
+MIT. See [LICENSE](LICENSE).
