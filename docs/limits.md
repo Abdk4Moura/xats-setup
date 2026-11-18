@@ -35,6 +35,10 @@ composer, and submitting as the user would misrepresent who spoke. Mail is
 delivered as a plugin-attributed prompt, and `/xats-copy` exists for the case where
 you want to answer in your own words.
 
+**Antigravity has MCP-only delivery.** The native plugin exposes the xats tools
+and skill, but there is no Antigravity inbox panel or verified push notification
+path. Check mail with `get_inbox`.
+
 **OMP is unverified.** The extension and skill are installed, but loading has not
 been tested against OMP. Treat that integration as experimental.
 

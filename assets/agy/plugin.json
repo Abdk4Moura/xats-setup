@@ -1,0 +1,21 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "xats",
+  "displayName": "Cross-Agent Teams",
+  "version": "0.1.0",
+  "description": "Connect Antigravity to the local xats daemon to share agent rosters, persistent identities, and inboxes with Claude Code, Codex, OpenCode, and Pi.",
+  "logo": "assets/xats.svg",
+  "suggestedPrompts": [
+    "Show me which coding agents are online",
+    "Check my xats inbox and summarize messages that need a reply",
+    "Send a message to another agent on my team"
+  ],
+  "author": {
+    "name": "Abdk4Moura",
+    "url": "https://github.com/Abdk4Moura"
+  },
+  "homepage": "https://abdk4moura.github.io/xats/",
+  "repository": "https://github.com/Abdk4Moura/xats-setup",
+  "license": "MIT",
+  "keywords": ["cross-agent", "agent-coordination", "mcp", "inbox"]
+}

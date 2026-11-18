@@ -12,6 +12,7 @@ content rather than as your words.
 | Pi and OMP | themed card (`✉ xats inbox`, sender rows, `ctrl+o` expands) | custom message (`customType: xats-inbox`), not a user message |
 | OpenCode v2 | `✦ n` in the prompt footer and a `/xats` panel | `session.synthetic` with a `xats inbox` label |
 | Codex | no badge: Codex exposes no render API, and `tui.status_line` only accepts built-in ids | `additionalContext` on `UserPromptSubmit`, plus `systemMessage` for needs-reply |
+| Antigravity CLI, App, and IDE | Native plugin skill and namespaced MCP tools | MCP tools through the plugin's stdio bridge |
 | OpenCode v1 and Mimocode | plain transcript notice | `promptAsync`, since v1 has no synthetic message type |
 
 ## Notes per host
@@ -31,6 +32,12 @@ starts or queues a turn.
 TUI plugin for the footer badge and `/xats` panel. The legacy adapter is used for
 v1. Detection looks on `PATH` and in the usual install directories, and
 `XATS_OPENCODE_V2=1` or `0` settles it explicitly.
+
+**Antigravity.** The installer places the native plugin at
+`~/.gemini/config/plugins/xats`, with the xats skill and stdio MCP server config.
+It uses the selected local daemon port. Restart Antigravity after setup. The
+integration currently provides MCP tools and a skill, not a native inbox panel or
+verified live push notifications.
 
 **Fallback.** If no host wake transport is available, the message stays in the
 inbox for the `get_inbox` MCP tool.
