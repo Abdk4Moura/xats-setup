@@ -20,6 +20,7 @@ import { installCodex } from './lib/codex.mjs';
 import { installOpencode, installMimocode, installHarnesses } from './lib/harness.mjs';
 import { installPi, ensurePiLabel } from './lib/pi.mjs';
 import { installOmp } from './lib/omp.mjs';
+import { installAgy } from './lib/agy.mjs';
 import { installBridge } from './lib/bridge.mjs';
 import { installPeer } from './lib/peer.mjs';
 import { enablePeerService, disablePeerService, startPeerService, stopPeerService, restartPeerService, isPeerServiceEnabled } from './lib/peer-service.mjs';
@@ -34,7 +35,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
-const AGENTS = ['claude', 'codex', 'pi', 'omp', 'opencode', 'mimocode'];
+const AGENTS = ['claude', 'codex', 'pi', 'omp', 'opencode', 'mimocode', 'agy'];
 const INFRA = ['daemon', 'service', 'bridge', 'peer'];
 const ALL = [...INFRA.slice(0, 2), ...AGENTS, ...INFRA.slice(2)]; // daemon,service,agents,bridge,peer
 const HARNESS_ALIAS = new Set(['opencode', 'mimocode', 'pi']); // back-compat: harness = opencode+mimocode+pi until removed
@@ -178,6 +179,7 @@ function detectAgentFound(paths) {
     pi: existsSync(paths.piDir),
     opencode: existsSync(paths.opencodePlugins) || existsSync(path.dirname(paths.opencodePlugins)),
     mimocode: existsSync(paths.mimocodePlugins),
+    agy: existsSync(paths.agyPlugin) || existsSync(path.join(paths.home, '.gemini', 'config')),
     daemon: true,
     service: true,
     bridge: true,
@@ -369,6 +371,7 @@ async function main() {
 
   if (opts.components.has('claude')) { setStepStatus('claude','running','wiring'); installClaude(paths, { withChannel: opts.withChannel, baseUrl: BASE_URL }); setStepStatus('claude','done','done'); } else setStepStatus('claude','skip','skipped');
   if (opts.components.has('codex')) { setStepStatus('codex','running','wiring'); installCodex(paths, { baseUrl: BASE_URL }); setStepStatus('codex','done','done'); } else setStepStatus('codex','skip','skipped');
+  if (opts.components.has('agy')) { setStepStatus('agy','running','wiring'); installAgy(paths, { port }); setStepStatus('agy','done','done'); } else setStepStatus('agy','skip','skipped');
   if (opts.components.has('pi')) { setStepStatus('pi','running','wiring'); installPi(paths); setStepStatus('pi','done','done'); } else setStepStatus('pi','skip','skipped');
   if (opts.components.has('omp')) { setStepStatus('omp','running','wiring'); installOmp(paths); setStepStatus('omp','done','done'); } else setStepStatus('omp','skip','skipped');
   if (opts.components.has('opencode')) { setStepStatus('opencode','running','wiring'); installOpencode(paths); setStepStatus('opencode','done','done'); } else setStepStatus('opencode','skip','skipped');
@@ -477,7 +480,7 @@ async function main() {
   console.log(`  Mode:   ${mode}${prior ? ` (was v${prior.version})` : ''} -> v${VERSION}`);
   console.log(`  Daemon: ${lay ? lay.entry : 'n/a'}`);
   console.log(`  Bus:    ${BASE_URL}`);
-  console.log(`  Next:   restart Claude Code / Pi (/reload) / opencode so they register on the bus.`);
+  console.log(`  Next:   restart selected agent hosts so they load their xats integration.`);
   if (opts.components.has('bridge'))
     console.log(`  Bridge: add a peer to ~/.xats/bridge/peers.json, then \`node ~/.xats/bridge/bridge.mjs up\` (coordinate with the remote).`);
   const lf2 = getLogFile();

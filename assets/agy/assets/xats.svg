@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Cross-Agent Teams">
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="#211f35"/>
+  <path d="M37 43h54M37 85h54M42 43v42m44-42v42" fill="none" stroke="#a78bfa" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="37" cy="43" r="12" fill="#f4f1ff"/>
+  <circle cx="91" cy="43" r="12" fill="#f4f1ff"/>
+  <circle cx="37" cy="85" r="12" fill="#f4f1ff"/>
+  <circle cx="91" cy="85" r="12" fill="#f4f1ff"/>
+  <circle cx="64" cy="64" r="9" fill="#c4b5fd"/>
+  <path d="M37 43l27 21 27-21M37 85l27-21 27 21" fill="none" stroke="#a78bfa" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

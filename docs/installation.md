@@ -14,7 +14,7 @@ upgrade path.
 npx xats-setup                 # interactive: Enter for all, c to pick agents
 npx xats-setup --yes           # non-interactive full install; peer listener stays off
 npx xats-setup --dry-run       # preview every action, change nothing
-npx xats-setup --only=daemon,service,pi   # only these components
+npx xats-setup --only=daemon,service,agy  # daemon, service, and Antigravity
 npx xats-setup --only=peer                # Stage 1 peer runtime only
 npx xats-setup --without claude,pi        # exclude, aliases: --except/--exclude/--skip/--omit
 npx xats-setup --label umar    # prefix for this box's agent identities
@@ -41,9 +41,10 @@ prints the path. Use `--verbose` or `--no-ephemeral` to stream the log live.
 
 ## After installing
 
-Restart Claude Code, reload Pi, or restart OpenCode so each host registers on the
-bus. The installer also runs a probe (register, list, deregister) and verifies the
-files for each selected component.
+Restart Claude Code, reload Pi, restart OpenCode, or restart Antigravity so each
+host loads its integration. The Antigravity plugin is installed at
+`~/.gemini/config/plugins/xats`; inspect it with `agy plugin list`. The installer
+also runs a probe (register, list, deregister) and verifies selected component files.
 
 Health check:
 

@@ -7,7 +7,7 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![site](https://img.shields.io/badge/site-abdk4moura.github.io%2Fxats-2ea44f)](https://abdk4moura.github.io/xats/)
 
-One roster and one set of inboxes shared by Claude Code, Codex, OpenCode and Pi.
+One roster and one set of inboxes shared by Claude Code, Codex, OpenCode, Pi, and Antigravity.
 A local daemon, no account, and identities that outlive a single session.
 
 ## Why this exists
@@ -72,6 +72,7 @@ compressed for playback; nothing is staged.*
 | `service` | Starts the daemon at login or boot (systemd, launchd, Scheduled Task) |
 | `claude`  | SessionStart and SessionEnd hooks, MCP entry, skill, native status band and `/xats` pane |
 | `codex`   | Hooks plus MCP entry and skill; mail arrives as developer context on the next turn |
+| `agy`     | Native Antigravity plugin, skill, and stdio MCP tools |
 | `pi`      | Extension and skill that draw a themed `xats-inbox` card |
 | `opencode`| Plugin, skill and a TUI badge with a `/xats` panel; the v2 API is selected when detected |
 | `mimocode`| Legacy plugin and skill |
