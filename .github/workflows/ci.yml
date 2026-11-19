@@ -1,15 +1,6 @@
-# Cross-platform CI for xats-setup.
-#
-# This is the project's own buildfarm: GitHub-hosted runners, so it never
-# contends with a shared worker lease, and it is the only practical way to cover
-# macOS — which had zero verification before this workflow existed.
-#
-# Five jobs:
-#   test          - the suite on Linux/macOS/Windows x Node 22 and 24
-#   install-smoke - the packed npm bin in a seeded, sandboxed HOME
-#   host-contracts - pinned native Claude/Antigravity validators, no model calls
-#   test-daemon   - tests that need the daemon's native runtime dependencies
-#   daemon        - build, endpoint parity, and demo checks on Linux/macOS/Windows
+# Every PR keeps the full OS/Node matrix, clean packed-install checks, and
+# pinned real-host contracts. Do not repeat the full suite in separate jobs.
+# Target: about one minute with warm caches, excluding runner queue time.
 name: ci
 
 on:
@@ -27,41 +18,60 @@ permissions:
 
 jobs:
   test:
-    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    name: complete suite (${{ matrix.os }}, node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 3
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         node: [22, 24]
+    env:
+      XATS_SETUP_TEST_DEPS: ${{ github.workspace }}/node_modules
+      XATS_TEST_CONCURRENCY: 3
+      FORCE_COLOR: 0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
+        id: node
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-      - name: Install
-        run: npm ci
-      - name: Build the daemon (the endpoint test needs daemon/dist)
-        run: npm run build:daemon
-      - name: Test
-        # The suite spawns daemons and binds loopback ports; keep the output in
-        # the log for post-mortem and do not retry, so flakes stay visible.
-        run: npm test
-      - name: Assert the suite was not silently truncated
-        # A glob that matches fewer files still exits 0. Compare the reported test
-        # count against the number of test files we actually ship.
+      # Exact keys only: native addons must never cross OS/architecture/Node or
+      # dependency-lock boundaries. Packed-install jobs still run clean npm ci.
+      - uses: actions/cache@v4
+        id: deps
+        with:
+          path: node_modules
+          key: xats-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json', 'package.json') }}
+      - name: Install exact dependencies on a cache miss
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund
+      - name: Check dependency tree and native SQLite ABI
         shell: bash
         run: |
-          files=$(ls test/*.test.mjs | wc -l)
-          echo "test files: $files"
-          test "$files" -ge 20 || { echo "unexpectedly few test files"; exit 1; }
+          npm ls --depth=0
+          node -e "require.resolve('fastify'); const Database=require('better-sqlite3'); const db=new Database(':memory:'); db.exec('create table qc(x)'); db.close(); console.log(process.platform, process.arch, 'Node', process.version, 'native SQLite ready');"
+      - name: Build from current source
+        run: npm run build:daemon
+      - name: Exact source/build API parity
+        run: node scripts/check-daemon-routes.mjs
+      - name: Run all tests once and require actual critical coverage
+        shell: bash
+        run: |
+          set +e
+          npm test 2>&1 | tee "$RUNNER_TEMP/test.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          node scripts/assert-ci-coverage.mjs "$RUNNER_TEMP/test.log"
+      - name: Real two-agent demo on each OS
+        if: matrix.node == 22
+        run: node scripts/demo.mjs --private
 
   install-smoke:
-    name: install smoke (${{ matrix.os }})
+    name: packed install + rerun (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 3
     strategy:
       fail-fast: false
       matrix:
@@ -72,167 +82,28 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-
-      - name: Build the daemon included in the npm package
-        run: npm run build:daemon
-      # npm ci seeds npm's cache. The script uses npm exec --offline against
-      # the exact tarball, then tests dry-run, preservation, and a second install.
-      # No daemon, service, peer listener, or model is started.
-      - name: Packed npm-bin install and rerun safety
+      # Deliberately clean on every CI: this independently verifies installation
+      # scripts and seeds the offline npm cache used by the actual packed bin.
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:daemon
+      - name: Actual npm-bin install, dry-run, preservation and second install
         run: node scripts/smoke-packed-install.mjs
 
   host-contracts:
-    name: pinned native host contracts (no models)
+    name: pinned real host contracts (no models)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Cache pinned public host tools
+      - name: Cache versioned public host tools
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/xats-host-tools
-          key: xats-host-contracts-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-host-versions.json') }}
-      - name: Validate native plugin schemas and Claude mod tests
+          key: xats-host-contracts-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-host-versions.json') }}
+      - name: Real Claude/Antigravity validation and official Claude mod tests
         env:
           XATS_CI_HOST_TOOLS: ${{ runner.temp }}/xats-host-tools
         run: node scripts/validate-host-contracts.mjs
-
-  # The suite skips 10 daemon-backed tests on a clean checkout (they need fastify
-  # + better-sqlite3). Skipping is right for contributors, but CI must run them:
-  # they cover per-session identity, name takeover and inbox isolation.
-  #
-  # `cross-agent-teams-mcp` is a devDependency, so `npm ci` already provides
-  # fastify and better-sqlite3 — no second install, no floating transitive tree.
-  test-daemon:
-    name: test with daemon deps (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        # macos-latest is arm64 on GitHub's current images, which is the
-        # architecture that matters here. The explicit macos-14 label stopped
-        # being schedulable for this repository: those jobs were cancelled with
-        # zero steps in every run, which is a provisioning failure rather than a
-        # test result, and coverage that cannot be scheduled is not coverage.
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - name: Build the daemon (the endpoint test needs daemon/dist)
-        run: npm run build:daemon
-
-      - name: Preflight native deps
-        shell: bash
-        run: |
-          node -e "
-            const os = require('node:os');
-            console.log('platform :', process.platform, process.arch);
-            console.log('os       :', os.type(), os.release());
-            // The daemon derives its device label from this; a hostname that
-            // normalises to empty makes it exit with invalid_device_label.
-            console.log('hostname :', JSON.stringify(os.hostname()), 'len', os.hostname().length);
-            console.log('fastify  :', require.resolve('fastify'));
-            const Database = require('better-sqlite3');
-            const db = new Database(':memory:');
-            db.exec('create table t(x)'); db.prepare('insert into t values (1)').run();
-            console.log('sqlite   :', db.prepare('select count(*) c from t').get().c, 'row(s)');
-            console.log('native   :', require.resolve('better-sqlite3/build/Release/better_sqlite3.node'));
-            db.close();
-          "
-          # The file type tells us arm64 vs x86_64 even when node's arch says otherwise.
-          NATIVE=$(node -p "require.resolve('better-sqlite3/build/Release/better_sqlite3.node')")
-          file "$NATIVE" || true
-
-      - name: Test with daemon dependencies
-        shell: bash
-        env:
-          XATS_SETUP_TEST_DEPS: ${{ github.workspace }}/node_modules
-        run: |
-          npm test 2>&1 | tee "$RUNNER_TEMP/test.log"
-          status=${PIPESTATUS[0]}
-          # Assert by test NAME, never by total count: a hardcoded number goes
-          # stale the moment a test is added, and it hides which test mattered.
-          # One skip is legitimate — the routed-namespace E2E needs Linux root +
-          # netns, which a hosted runner does not grant — so requiring zero skips
-          # would fail for the wrong reason.
-          grep -q "# fail 0" "$RUNNER_TEMP/test.log" || { echo "::error::suite reported failures"; exit 1; }
-          grep -qE "^ok [0-9]+ - same preferred name from two sessions stays two distinct identities$" "$RUNNER_TEMP/test.log" \
-            || { echo "::error::daemon-backed identity tests skipped instead of running"; exit 1; }
-          grep -qE "^ok [0-9]+ - every REST endpoint the adapters rely on exists and answers$" "$RUNNER_TEMP/test.log" \
-            || { echo "::error::endpoint coverage skipped instead of running"; exit 1; }
-          exit "$status"
-
-  # The daemon is our source now (daemon/src). Build it and prove the endpoint
-  # set the adapters depend on, so a build can never silently drop a route the
-  # way the old vendored bundle did (its route set did not match its source).
-  daemon:
-    name: daemon build + endpoints (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - name: Build the daemon from source
-        run: npm run build:daemon
-      - name: Assert the build contains every intended endpoint
-        shell: bash
-        run: |
-          # The intended set includes the read-only /api/cursor endpoint.
-          # /api/events (SSE) was removed on purpose and the pi adapter polls.
-          missing=0
-          for route in api/send api/inbox api/cursor api/agents api/agents/all api/register api/deregister api/heartbeat api/whoami; do
-            grep -q "$route" daemon/dist/cli.js || { echo "::error::daemon build is missing $route"; missing=1; }
-          done
-          exit $missing
-      - name: Source and build must expose exactly the intended routes
-        shell: bash
-        run: |
-          # Set equality, both directions, against an explicit list:
-          #  - a route in source but missing from the build = a build regression
-          #  - a route in the build but not in source = a stale route surviving a
-          #    source deletion, which a one-way check would happily pass
-          # The expected set is 9, including read-only /api/cursor. /api/events
-          # (SSE) was removed deliberately and is documented as a breaking change.
-          expected=$(printf '%s\n' api/agents api/agents/all api/cursor api/deregister api/heartbeat api/inbox api/register api/send api/whoami | sort)
-          src=$(grep -oE "'/api/[a-z_/]+'" daemon/src/daemon/rest-api.ts | tr -d "'" | sed 's|^/||' | sort -u)
-          dist=$(grep -oE "api/[a-z_/]+" daemon/dist/cli.js | sort -u)
-          echo "--- expected ---"; echo "$expected"
-          echo "--- source ---";   echo "$src"
-          echo "--- build ---";    echo "$dist"
-          if [ "$src" != "$expected" ]; then echo "::error::source route set differs from the intended set"; exit 1; fi
-          if [ "$dist" != "$expected" ]; then echo "::error::build route set differs from the intended set"; exit 1; fi
-          echo "route sets match exactly (9)"
-      - name: Demo (two agents, one message, end to end)
-        shell: bash
-        env:
-          XATS_SETUP_TEST_DEPS: ${{ github.workspace }}/node_modules
-        run: node scripts/demo.mjs --private
-      - name: Endpoint + session_key smoke
-        shell: bash
-        env:
-          XATS_SETUP_TEST_DEPS: ${{ github.workspace }}/node_modules
-        run: |
-          # Run the whole suite (the daemon tests need deps) and require the
-          # endpoint test to have PASSED by name — a skip must not look green.
-          npm test 2>&1 | tee "$RUNNER_TEMP/daemon-test.log"
-          status=${PIPESTATUS[0]}
-          grep -qE "^ok [0-9]+ - every REST endpoint the adapters rely on exists and answers$" "$RUNNER_TEMP/daemon-test.log" \
-            || { echo "::error::endpoint coverage did not run on this platform"; exit 1; }
-          exit "$status"

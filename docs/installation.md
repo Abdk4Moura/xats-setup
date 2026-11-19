@@ -72,6 +72,9 @@ previously published installers such as `0.3.14`.
 - An occupied saved port is retained only when setup can verify that the process
   is the expected daemon. An unrelated or unverified listener stops setup; it
   does not silently redirect every integration to a different port.
+- Schema initialization does not consume existing unread mail or advance a zero
+  inbox cursor. Legacy history with no recorded read position can replay rather
+  than being silently marked read.
 - Unchanged daemon builds do not require a restart. Changed builds have a single
   restart owner, and failed dependency installation remains eligible for repair
   on the next run.
@@ -125,11 +128,23 @@ by the service before restarting it.
 
 ## What CI verifies
 
-CI tests the packed npm executable in a temporary home, including dry-run,
-repeat installation, preserved user settings, and recoverable JSONC comments.
-Daemon tests exercise real processes, sockets, and storage on the OS matrix.
-One Linux job runs pinned real Claude and Antigravity validators, including
-Claude's mod-test kit, without accounts or model calls.
+Every CI runs the complete suite once on Linux, macOS, and Windows with Node 22
+and 24, including native dependencies. Exact OS/architecture/Node/lockfile caches
+save repeated dependency setup; native SQLite is opened before testing to catch
+an incompatible cache. Builds always use current source. File manifests and
+named critical tests guard against silently reduced or skipped coverage.
+
+Clean packed-executable installs run separately on all three OSes, including
+dry-run, repeat installation, preserved user settings, and recoverable JSONC
+comments. One Linux job runs pinned real Claude and Antigravity validators and
+Claude's mod-test kit, without accounts or model calls. These checks run on
+every PR and main push, not only selected paths.
+
+The target is about one minute with warm caches, excluding GitHub runner queues.
+Cold dependency/CLI downloads can take longer. Full suites are not duplicated in
+endpoint and dependency job groups. CI uses three isolated file workers;
+`npm test` defaults to one worker locally, configurable with
+`XATS_TEST_CONCURRENCY` from 1 to 8.
 
 Version-selection and host-API unit tests still use controlled fixtures. These
 checks do not prove live agent rendering, model attention, or successful

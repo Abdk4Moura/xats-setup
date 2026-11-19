@@ -40,7 +40,7 @@ function run(command, args) {
   if (result.stderr) process.stderr.write(result.stderr);
   if (result.error) throw result.error;
   assert.equal(result.status, 0, `${command} ${args.join(' ')} exited ${result.status}`);
-  return result.stdout;
+  return (result.stdout || '') + (result.stderr || '');
 }
 function assertVersion(binary, version) {
   const actual = run(binary, ['--version']).trim();
@@ -81,9 +81,19 @@ try {
   fs.chmodSync(agy, 0o755);
   assertVersion(agy, pins.agy.version);
 
-  run(claude, ['plugin', 'validate', '--strict', '--json', path.join(repo, 'assets/claude/mod')]);
-  run(claude, ['plugin', 'test', path.join(repo, 'assets/claude/mod')]);
-  run(agy, ['plugin', 'validate', '--strict', '--json', path.join(repo, 'assets/agy')]);
+  const mod = path.join(repo, 'assets/claude/mod');
+  const claudeReport = JSON.parse(run(claude, ['plugin', 'validate', '--strict', '--json', mod]));
+  assert.equal(claudeReport.success, true);
+  assert.ok(claudeReport.contents?.some(item => item.type === 'hooks'), 'Claude validator did not find the mod hooks');
+  assert.ok(fs.readdirSync(path.join(mod, 'tests')).some(name => /\.test\.tsx?$/.test(name)), 'Claude mod tests are missing');
+  const kit = run(claude, ['plugin', 'test', mod]);
+  assert.match(kit, /\b[1-9]\d* pass\b/, 'Claude kit did not execute passing tests');
+  assert.match(kit, /\b0 fail\b/, 'Claude kit did not report zero failures');
+  assert.doesNotMatch(kit, /\b[1-9]\d* skip(?:ped)?\b/, 'Claude kit unexpectedly skipped tests');
+  const agyReport = JSON.parse(run(agy, ['plugin', 'validate', '--strict', '--json', path.join(repo, 'assets/agy')]));
+  assert.equal(agyReport.name, 'xats');
+  assert.equal(agyReport.components?.mcpServers, 1, 'Antigravity did not discover the MCP server');
+  assert.equal(agyReport.components?.skills, 1, 'Antigravity did not discover the coordination skill');
   console.log('Pinned native host contracts passed. This does not test live agent messaging.');
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
