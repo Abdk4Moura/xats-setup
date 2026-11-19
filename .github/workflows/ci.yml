@@ -4,10 +4,10 @@
 # contends with a shared worker lease, and it is the only practical way to cover
 # macOS — which had zero verification before this workflow existed.
 #
-# Four jobs:
+# Five jobs:
 #   test          - the suite on Linux/macOS/Windows x Node 22 and 24
-#   install-smoke - the installer, in a sandboxed HOME, so it cannot touch the
-#                   runner's real home or install a service
+#   install-smoke - the packed npm bin in a seeded, sandboxed HOME
+#   host-contracts - pinned native Claude/Antigravity validators, no model calls
 #   test-daemon   - tests that need the daemon's native runtime dependencies
 #   daemon        - build, endpoint parity, and demo checks on Linux/macOS/Windows
 name: ci
@@ -74,52 +74,32 @@ jobs:
           cache: npm
       - run: npm ci
 
-      # Dry run first: proves argument parsing without writing anything.
-      - name: Dry run (unix)
-        if: runner.os != 'Windows'
-        run: node install.mjs --dry-run --yes --only=pi,opencode,agy
+      - name: Build the daemon included in the npm package
+        run: npm run build:daemon
+      # npm ci seeds npm's cache. The script uses npm exec --offline against
+      # the exact tarball, then tests dry-run, preservation, and a second install.
+      # No daemon, service, peer listener, or model is started.
+      - name: Packed npm-bin install and rerun safety
+        run: node scripts/smoke-packed-install.mjs
 
-      - name: Dry run (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: node install.mjs --dry-run --yes --only=pi,opencode,agy
-
-      # Real install into a sandboxed home. No daemon, no service, no peer
-      # listener: only the filesystem components an agent needs.
-      - name: Install into sandbox (unix)
-        if: runner.os != 'Windows'
+  host-contracts:
+    name: pinned native host contracts (no models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Cache pinned public host tools
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/xats-host-tools
+          key: xats-host-contracts-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-host-versions.json') }}
+      - name: Validate native plugin schemas and Claude mod tests
         env:
-          # Runner images set XDG_CONFIG_HOME pointing at the real home; the
-          # opencode path resolves from it, so sandboxing needs both.
-          HOME: ${{ runner.temp }}/home
-          XDG_CONFIG_HOME: ${{ runner.temp }}/home/.config
-        run: |
-          mkdir -p "$HOME/.config/opencode"
-          node install.mjs --only=pi,opencode,agy -y --no-ephemeral
-          test -f "$HOME/.pi/agent/extensions/xats.ts"
-          test -f "$HOME/.pi/agent/skills/xats/SKILL.md"
-          test -f "$HOME/.config/opencode/plugins/xats-register.ts"
-          test -f "$HOME/.gemini/config/plugins/xats/plugin.json"
-          test -f "$HOME/.gemini/config/plugins/xats/skills/xats/SKILL.md"
-          echo "sandbox install OK"
-
-      - name: Install into sandbox (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $sandbox = Join-Path $env:RUNNER_TEMP 'home'
-          New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
-          New-Item -ItemType Directory -Force -Path (Join-Path $sandbox '.config\opencode') | Out-Null
-          $env:HOME = $sandbox
-          $env:USERPROFILE = $sandbox
-          $env:XDG_CONFIG_HOME = Join-Path $sandbox '.config'
-          node install.mjs --only=pi,opencode,agy -y --no-ephemeral
-          if (-not (Test-Path (Join-Path $sandbox '.pi\agent\extensions\xats.ts'))) { throw 'pi extension missing' }
-          if (-not (Test-Path (Join-Path $sandbox '.pi\agent\skills\xats\SKILL.md'))) { throw 'pi skill missing' }
-          if (-not (Test-Path (Join-Path $sandbox '.config\opencode\plugins\xats-register.ts'))) { throw 'opencode plugin missing' }
-          if (-not (Test-Path (Join-Path $sandbox '.gemini\config\plugins\xats\plugin.json'))) { throw 'agy plugin manifest missing' }
-          if (-not (Test-Path (Join-Path $sandbox '.gemini\config\plugins\xats\skills\xats\SKILL.md'))) { throw 'agy xats skill missing' }
-          Write-Output 'sandbox install OK'
+          XATS_CI_HOST_TOOLS: ${{ runner.temp }}/xats-host-tools
+        run: node scripts/validate-host-contracts.mjs
 
   # The suite skips 10 daemon-backed tests on a clean checkout (they need fastify
   # + better-sqlite3). Skipping is right for contributors, but CI must run them:

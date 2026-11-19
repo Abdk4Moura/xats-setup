@@ -4,22 +4,26 @@ Everything the installer does, every flag, and how to undo it.
 
 ## Requirements
 
-Node 20 or newer (22 LTS recommended), on Windows, macOS or Linux. No sudo: all
-state lands under `~/.xats`. The installer is idempotent, so re-running it is the
-upgrade path.
+Node 20 or newer (22 LTS recommended), on Windows, macOS or Linux. Install as
+the account that runs your agents; sudo is not required for a normal user install.
+Managed integration files live under `~/.xats` and the individual hosts' config
+directories. The mailbox database normally lives at
+`~/.cross-agent-teams-mcp/data.db`; a configured `CROSS_AGENT_TEAMS_MCP_HOME`
+is retained. Re-running the installer is the upgrade path.
 
 ## Flags
 
 ```sh
 npx xats-setup                 # interactive: Enter for all, c to pick agents
 npx xats-setup --yes           # non-interactive full install; peer listener stays off
-npx xats-setup --dry-run       # preview every action, change nothing
+npx xats-setup --dry-run       # preview without changing config or services
 npx xats-setup --only=daemon,service,agy  # daemon, service, and Antigravity
 npx xats-setup --only=peer                # Stage 1 peer runtime only
 npx xats-setup --without claude,pi        # exclude, aliases: --except/--exclude/--skip/--omit
 npx xats-setup --label umar    # prefix for this box's agent identities
 npx xats-setup --force         # reinstall the daemon base package
-npx xats-setup reset           # remove everything the installer added
+npx xats-setup --allow-downgrade # explicitly allow an older tracked installer
+npx xats-setup reset           # remove managed files; read the reset notes first
 npx xats-setup reset --only=pi # remove only Pi's pieces
 ```
 
@@ -58,23 +62,78 @@ curl "http://127.0.0.1:$(cat ~/.xats/port 2>/dev/null || echo 9100)/health"
 npx xats-setup
 ```
 
-Re-running installs the newer daemon and rewrites the host integrations together,
-which is why the two should not be updated separately. The installer picks up a
-new version from npm; read the release notes before jumping several versions.
+Read the release notes before jumping several versions. The safety behavior
+below applies to versions containing the installer-hardening changes, not to
+previously published installers such as `0.3.14`.
+
+- Existing selected agent configurations and supervisor definitions are checked
+  before installation files or the saved port are changed. Malformed settings
+  stop setup rather than being replaced with an empty configuration.
+- An occupied saved port is retained only when setup can verify that the process
+  is the expected daemon. An unrelated or unverified listener stops setup; it
+  does not silently redirect every integration to a different port.
+- Unchanged daemon builds do not require a restart. Changed builds have a single
+  restart owner, and failed dependency installation remains eligible for repair
+  on the next run.
+- Changed configuration and managed integration files have exact-byte sibling
+  backups named `*.xats-backup-*`. Unchanged reruns do not accumulate backups.
+  JSONC comments may be normalized away in the active file, but remain in its
+  raw backup. User-added files in managed plugin directories are retained.
+- Custom supervisor definitions are not overwritten. Reconcile them manually
+  if setup reports an unknown definition. Some legacy Windows daemons need to
+  be stopped with their existing supervisor before their action can be migrated
+  to explicitly scoped database and PID-file arguments.
+- Existing Codex MCP authentication and options are not discarded to change a
+  URL. If setup reports `manual-update-required`, update only the named server's
+  URL and retry.
+- Tracked downgrades are refused unless `--allow-downgrade` is explicit.
+
+Backups are recovery aids, not a full transactional snapshot of native npm
+installation. Keep your own backup before major upgrades. Changing Node's major
+version can also require rebuilding native dependencies.
+
+Native process-ownership probes fail closed. macOS daemon paths containing
+spaces or quoting, and Linux executable paths requiring unsupported systemd
+quoting, are rejected before service installation rather than being launched
+without verifiable ownership. A missing native inspection tool or insufficient
+permissions can require manual supervisor reconciliation.
 
 ## Reset and uninstall
 
 ```sh
-npx xats-setup reset            # remove everything
+npx xats-setup reset            # destructive removal of managed components
 npx xats-setup reset --dry-run  # preview only
 npx xats-setup reset --only=pi
 ```
 
+Resetting the peer component removes its private identity, pairings, and
+configuration. Resetting bridge removes its peer list. The separate mailbox
+database is retained. Codex MCP configuration is deliberately retained to avoid
+silently discarding authentication or custom options; remove the named server
+manually if you no longer need it.
+
+Dry runs do not change installation files, processes, or services. They still
+write a diagnostic log in the system temporary directory.
+
 ## Native dependencies
 
-The daemon builds against better-sqlite3 for its message store. On a box without
-a C++ toolchain the installer reports the failure rather than leaving a half-built
-runtime, and Node 22 LTS has the best prebuilt coverage.
+The daemon uses better-sqlite3 for its message store. Failed npm installation is
+reported and marked for retry; setup does not restart the daemon after that
+failure. Node 22 LTS has broad prebuilt coverage. If you change Node versions and
+encounter a native ABI mismatch, rebuild better-sqlite3 with the same Node used
+by the service before restarting it.
+
+## What CI verifies
+
+CI tests the packed npm executable in a temporary home, including dry-run,
+repeat installation, preserved user settings, and recoverable JSONC comments.
+Daemon tests exercise real processes, sockets, and storage on the OS matrix.
+One Linux job runs pinned real Claude and Antigravity validators, including
+Claude's mod-test kit, without accounts or model calls.
+
+Version-selection and host-API unit tests still use controlled fixtures. These
+checks do not prove live agent rendering, model attention, or successful
+notifications in every real host version; those remain release acceptance tests.
 
 ## Install from a tarball
 

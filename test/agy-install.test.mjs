@@ -5,6 +5,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { installAgy } from '../lib/agy.mjs';
 import { reset } from '../lib/reset.mjs';
+import { setDry } from '../lib/log.mjs';
+
+function snapshot(dir, prefix = '') {
+  const result = {};
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const relative = path.join(prefix, entry.name), full = path.join(dir, entry.name);
+    if (entry.isDirectory()) Object.assign(result, snapshot(full, relative));
+    else result[relative] = { bytes: fs.readFileSync(full).toString('base64'), mode: fs.statSync(full).mode & 0o777 };
+  }
+  return result;
+}
 
 test('installs the Antigravity plugin with the selected daemon port', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-agy-install-'));
@@ -23,4 +34,48 @@ test('installs the Antigravity plugin with the selected daemon port', (t) => {
 
   reset({ agyPlugin: pluginDir }, new Set(['agy']));
   assert.equal(fs.existsSync(pluginDir), false);
+});
+
+test('Antigravity rerun preserves additions, MCP options, and edited assets without duplicate backups', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-agy-rerun-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  const pluginDir = path.join(root, 'xats');
+  const paths = { agyPlugin: pluginDir };
+  installAgy(paths, { port: 9123 });
+  const file = path.join(pluginDir, 'mcp_config.json');
+  const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+  config.customSentinel = 'keep';
+  config.mcpServers.user = { command: 'user-server' };
+  config.mcpServers.bus.headers = { 'X-Custom': 'keep' };
+  config.mcpServers.bus.env.CUSTOM_SENTINEL = 'keep';
+  fs.writeFileSync(file, JSON.stringify(config, null, 4));
+  fs.writeFileSync(path.join(pluginDir, 'user-added.txt'), 'keep this file');
+  fs.writeFileSync(path.join(pluginDir, 'assets/xats.svg'), 'locally edited icon');
+  installAgy(paths, { port: 9123 });
+  const result = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(result.customSentinel, 'keep');
+  assert.equal(result.mcpServers.user.command, 'user-server');
+  assert.equal(result.mcpServers.bus.headers['X-Custom'], 'keep');
+  assert.equal(result.mcpServers.bus.env.CUSTOM_SENTINEL, 'keep');
+  assert.equal(result.mcpServers.bus.env.XATS_PORT, '9123');
+  assert.equal(fs.readFileSync(path.join(pluginDir, 'user-added.txt'), 'utf8'), 'keep this file');
+  const backup = fs.readdirSync(path.join(pluginDir, 'assets')).find(name => name.startsWith('xats.svg.xats-backup-'));
+  assert.equal(fs.readFileSync(path.join(pluginDir, 'assets', backup), 'utf8'), 'locally edited icon');
+  const before = snapshot(root);
+  installAgy(paths, { port: 9123 });
+  assert.deepEqual(snapshot(root), before, 'same nondefault port must not create a default-port backup round trip');
+  setDry(true);
+  t.after(() => setDry(false));
+  installAgy(paths, { port: 9124 });
+  assert.deepEqual(snapshot(root), before);
+});
+
+test('malformed Antigravity config stops before plugin files change', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-agy-invalid-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  fs.writeFileSync(path.join(root, 'mcp_config.json'), '{invalid user settings');
+  fs.writeFileSync(path.join(root, 'user-added.txt'), 'keep');
+  const before = snapshot(root);
+  assert.throws(() => installAgy({ agyPlugin: root }), /invalid JSON/);
+  assert.deepEqual(snapshot(root), before);
 });

@@ -9,18 +9,19 @@
 //   harness  opencode/mimocode plugins + xats skill
 //   bridge   cross-machine relay (Node port; connect to mesh separately)
 //
-// Everything is idempotent — safe to re-run. Use --dry-run to preview.
+// Repeatable updates validate existing configuration before changing it.
+// Use --dry-run to preview; ambiguous existing services fail closed.
 import { log, setDry, isDry, initLogFile, getLogFile, enableEphemeral, disableEphemeral, setEphemeralSteps, setStepStatus } from './lib/log.mjs';
 import { paths as getPaths, summary, wslInfo, readLabelFile, writeLabelFile, readPort, writePort, pickPort } from './lib/platform.mjs';
 import { preflight } from './lib/preflight.mjs';
-import { installDaemon } from './lib/daemon.mjs';
-import { installService } from './lib/service.mjs';
-import { installClaude } from './lib/claude.mjs';
-import { installCodex } from './lib/codex.mjs';
-import { installOpencode, installMimocode, installHarnesses } from './lib/harness.mjs';
+import { installDaemon, daemonLayout, preflightDaemon } from './lib/daemon.mjs';
+import { installService, preflightService } from './lib/service.mjs';
+import { installClaude, preflightClaudeConfig } from './lib/claude.mjs';
+import { installCodex, preflightCodexConfig } from './lib/codex.mjs';
+import { installOpencode, installMimocode, installHarnesses, preflightHarnessConfig } from './lib/harness.mjs';
 import { installPi, ensurePiLabel } from './lib/pi.mjs';
 import { installOmp } from './lib/omp.mjs';
-import { installAgy } from './lib/agy.mjs';
+import { installAgy, preflightAgyConfig } from './lib/agy.mjs';
 import { installBridge } from './lib/bridge.mjs';
 import { installPeer } from './lib/peer.mjs';
 import { enablePeerService, disablePeerService, startPeerService, stopPeerService, restartPeerService, isPeerServiceEnabled } from './lib/peer-service.mjs';
@@ -66,11 +67,12 @@ function applyExclude(raw, set) {
   }
 }
 function parseArgs(argv) {
-  const o = { components: new Set(ALL), force: false, dry: false, label: null, reset: false, explicit: false, nonInteractive: false, interactive: false, verbose: false, withChannel: false };
+  const o = { components: new Set(ALL), force: false, allowDowngrade: false, dry: false, label: null, reset: false, explicit: false, nonInteractive: false, interactive: false, verbose: false, withChannel: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') o.dry = true;
     else if (a === '--force') o.force = true;
+    else if (a === '--allow-downgrade') o.allowDowngrade = true;
     else if (a === '--yes' || a === '-y' || a === '--non-interactive') o.nonInteractive = true;
     else if (a === '--interactive' || a === '-i') o.interactive = true;
     else if (a === '--verbose' || a === '--no-ephemeral') o.verbose = true;
@@ -101,8 +103,9 @@ Usage:
   npx xats-setup [options]
 
 Options:
-  --dry-run           preview every action, change nothing
+  --dry-run           preview without config/service changes (writes a log)
   --force             reinstall the daemon base package
+  --allow-downgrade   explicitly permit replacing a newer tracked installation
   --verbose           show live logs instead of ephemeral loader (also --no-ephemeral)
   -y, --yes, --non-interactive  skip interactive prompts (use defaults / --only/--no-)
   -i, --interactive   force interactive picker (default when TTY and no --only/--no-)
@@ -306,17 +309,36 @@ async function main() {
   }
   if (useEphemeral && !opts.reset) { setEphemeralSteps(opts.components); enableEphemeral(); }
   setEphemeralSteps(opts.components);
-  ensureDir(paths.xatsRoot);
-  // Dynamic port: pick free 9100-9104, persist to ~/.xats/port, use for service + health.
+  // Complete read-only validation before port, runtime, label, or service writes.
+  const { prior, mode } = describeRun(paths, VERSION);
+  if (mode === 'downgrade' && !opts.allowDowngrade) {
+    throw new Error(`Installed version ${prior.version} is newer than ${VERSION}. Use a matching/newer installer, or explicitly pass --allow-downgrade. No installation files were changed.`);
+  }
+  const pre = preflight();
   let port = readPort(paths, DEFAULT_PORT);
   if (opts.components.has('daemon') || opts.components.has('service')) {
-    const picked = await pickPort(paths, [9100, 9101, 9102, 9103, 9104]);
-    if (picked !== port) log.info(`port :${port} busy or not persisted → using :${picked}`);
-    port = picked;
-    if (!isDry()) writePort(paths, port);
-    else log.dry(`would persist port ${port} to ${paths.xatsRoot}/port`);
+    port = await pickPort(paths, [9100, 9101, 9102, 9103, 9104]);
   }
   const BASE_URL = `http://127.0.0.1:${port}`;
+  if (opts.components.has('claude') && existsSync(paths.claudeDir)) preflightClaudeConfig(paths);
+  if (opts.components.has('codex')) preflightCodexConfig(paths, { baseUrl: BASE_URL });
+  if (opts.components.has('agy')) preflightAgyConfig(paths);
+  if (opts.components.has('opencode')) preflightHarnessConfig('opencode', path.dirname(paths.opencodePlugins));
+  if (opts.components.has('mimocode')) preflightHarnessConfig('mimocode', path.dirname(paths.mimocodePlugins));
+  const daemonPlan = opts.components.has('daemon')
+    ? preflightDaemon(paths, { force: opts.force, betterSqlitePin: pre.betterSqlitePin })
+    : daemonLayout(paths);
+  if (opts.components.has('service') || (opts.components.has('daemon') && daemonPlan.updated && daemonPlan.existed)) {
+    if (!opts.components.has('daemon') && !existsSync(daemonPlan.entry) && !isDry()) {
+      throw new Error('Daemon is not installed. Include daemon with service in --only before starting it.');
+    }
+    await preflightService(daemonPlan, { paths, port, register: opts.components.has('service') });
+  }
+  ensureDir(paths.xatsRoot);
+  if (opts.components.has('daemon') || opts.components.has('service')) {
+    if (!isDry() && !writePort(paths, port)) throw new Error('Could not persist daemon port; setup stopped before runtime changes.');
+    if (isDry()) log.dry(`would persist port ${port} to ${paths.xatsRoot}/port`);
+  }
 
   // Stable Pi identity: persist XATS_LABEL to ~/.xats/label (+ setx on Windows).
   // Do this before wiring so the extension can read it even if env is unset.
@@ -353,21 +375,16 @@ async function main() {
     }
   }
 
-  // Detect a prior install so we can update it in place (idempotent + migrate).
-  const { prior, mode } = describeRun(paths, VERSION);
-
-  const pre = preflight();
-
   let lay = null;
   if (opts.components.has('daemon')) { setStepStatus('daemon','running','installing'); lay = installDaemon(paths, { force: opts.force, betterSqlitePin: pre.betterSqlitePin }); setStepStatus('daemon','done','done'); }
-  else { const { daemonLayout } = await import('./lib/daemon.mjs'); lay = daemonLayout(paths); setStepStatus('daemon','skip','skipped'); }
+  else { lay = daemonLayout(paths); setStepStatus('daemon','skip','skipped'); }
 
-  if (opts.components.has('service')) { setStepStatus('service','running','registering'); installService(lay, { port }); setStepStatus('service','done','done'); } else setStepStatus('service','skip','skipped');
+  if (opts.components.has('service')) { setStepStatus('service','running','registering'); await installService(lay, { port, paths, updated: lay.updated }); setStepStatus('service','done','done'); } else setStepStatus('service','skip','skipped');
   // On an UPGRADE where the daemon build actually changed, the old daemon is
   // still running the old code — restart it so the update takes effect. (Fresh
   // installs already started the new build in the service step.)
-  if (opts.components.has('daemon') && lay && lay.updated && mode !== 'fresh')
-    restartDaemon(paths, lay.entry, port);
+  if (opts.components.has('daemon') && !opts.components.has('service') && lay?.existed && lay.updated)
+    await restartDaemon(paths, lay.entry, port);
 
   if (opts.components.has('claude')) { setStepStatus('claude','running','wiring'); installClaude(paths, { withChannel: opts.withChannel, baseUrl: BASE_URL }); setStepStatus('claude','done','done'); } else setStepStatus('claude','skip','skipped');
   if (opts.components.has('codex')) { setStepStatus('codex','running','wiring'); installCodex(paths, { baseUrl: BASE_URL }); setStepStatus('codex','done','done'); } else setStepStatus('codex','skip','skipped');
