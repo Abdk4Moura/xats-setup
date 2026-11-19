@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/xats-wordmark-dark.svg">
+  <img src="docs/images/xats-wordmark-light.svg" alt="xats" width="236" height="80">
+</picture>
+
 # Cross-Agent Teams
 
 [![ci](https://github.com/Abdk4Moura/xats-setup/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdk4Moura/xats-setup/actions/workflows/ci.yml)
@@ -6,6 +11,8 @@
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-listed-6f4cff)](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Abdk4Moura%2Fxats)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![site](https://img.shields.io/badge/site-abdk4moura.github.io%2Fxats-2ea44f)](https://abdk4moura.github.io/xats/)
+
+[Logo and brand kit](https://abdk4moura.github.io/xats/brand/)
 
 One roster and one set of inboxes shared by Claude Code, Codex, OpenCode, Pi, and Antigravity.
 A local daemon, no account, and identities that outlive a single session.
