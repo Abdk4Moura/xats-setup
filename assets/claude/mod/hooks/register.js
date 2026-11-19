@@ -21,7 +21,7 @@
 
 // Stamped into /xats-status: if this string is not what you just deployed, the
 // host is running an older copy of the mod and nothing else you see matters.
-const MOD_BUILD = "2026-10-25-mailbox-cursor-v5";
+const MOD_BUILD = "2026-10-25-local-delivery-v6";
 
 let lastSessionID = "";
 let lastAgentsSeen = "none";
@@ -66,6 +66,18 @@ let lastSubmitError = "";
 let resolving = 0;
 let lastError = "";
 let polls = 0;
+let localOwned = false;
+let localUnsupported = false;
+let localLease = null;
+let localBusy = false;
+let localConnected = false;
+let localCanFallback = true;
+let localError = "";
+let localAttempt = null;
+// Retain every unresolved host outcome, not just the most recent receipt.
+let localOutcomes = {};
+let localAck = null;
+let localEpoch = 0;
 
 // Both `$.env.get` and `$.fs.read` are asynchronous in the mods API. Forgetting
 // the await is silent and brutal: a Promise stringifies to "[object Promise]",
@@ -246,6 +258,22 @@ async function loadAcceptedCursor($) {
         Number.isSafeInteger(saved.event_id) && saved.event_id >= 0) {
       acceptedEventId = saved.event_id;
       lastEventId = Math.max(lastEventId, acceptedEventId);
+      if (saved.local_delivery && typeof saved.local_delivery.attempt_id === "string" &&
+          ["host-queued", "transport-written", "inbox-consumed", "held", "refused", "failed", "unknown"].includes(saved.local_delivery.stage)) {
+        localAttempt = saved.local_delivery;
+      }
+      for (const attempt of Object.values(saved.local_outcomes ?? {})) {
+        if (Number.isSafeInteger(attempt?.event_id) && attempt.event_id > 0 &&
+            ["held", "refused", "unknown"].includes(attempt.stage)) {
+          localOutcomes[attempt.event_id] = attempt;
+        }
+      }
+      // Migrate the original single-attempt journal without changing version 1.
+      if (Number.isSafeInteger(localAttempt?.event_id) && localAttempt.event_id > 0 &&
+          ["held", "refused", "unknown"].includes(localAttempt.stage)) {
+        localOutcomes[localAttempt.event_id] = localAttempt;
+      }
+      if (localAttempt || Object.keys(localOutcomes).length) localCanFallback = false;
     } else if (saved?.agent_id && saved.agent_id !== agentId) {
       cursorError = "previous agent id ignored";
     }
@@ -253,6 +281,12 @@ async function loadAcceptedCursor($) {
     // Missing/torn cursor means replay, never skip. Do not seed from the
     // daemon's current max: mail could have arrived during this reload.
   }
+}
+
+async function writeCursor($) {
+  await $.fs.write(cursorPath, `${JSON.stringify({ version: 1, agent_id: agentId,
+    event_id: acceptedEventId, ...(localAttempt ? { local_delivery: localAttempt } : {}),
+    ...(Object.keys(localOutcomes).length ? { local_outcomes: localOutcomes } : {}) })}\n`);
 }
 
 async function persistAcceptedCursor($, batch) {
@@ -264,7 +298,7 @@ async function persistAcceptedCursor($, batch) {
   acceptedEventId = eventId;
   if (!cursorPath) return;
   try {
-    await $.fs.write(cursorPath, `${JSON.stringify({ version: 1, agent_id: agentId, event_id: eventId })}\n`);
+    await writeCursor($);
     cursorError = "";
   } catch (error) {
     // The prompt was accepted; never requeue it just because persistence
@@ -281,6 +315,18 @@ async function readMailboxCursor($, base) {
     if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("invalid mailbox cursor response");
     mailboxCursor = cursor;
     mailboxCursorError = "";
+    // Only actual inbox consumption proves these uncertain outcomes safe to
+    // forget. A later accepted notice alone does not resolve an older refusal.
+    let pruned = false;
+    for (const id of Object.keys(localOutcomes)) {
+      if (Number(id) <= cursor) { delete localOutcomes[id]; pruned = true; }
+    }
+    if (localAttempt && ["held", "refused", "unknown"].includes(localAttempt.stage) &&
+        localAttempt.event_id <= cursor) {
+      localAttempt = { ...localAttempt, stage: "inbox-consumed" };
+      pruned = true;
+    }
+    if (pruned && cursorPath) await writeCursor($);
     return cursor;
   } catch (error) {
     // Cursor lookup is advisory. If it fails, keep the established behavior:
@@ -306,7 +352,7 @@ async function invalidate($) {
 }
 
 async function deliver($) {
-  if (submitting || pending.length === 0) return;
+  if (localOwned || submitting || pending.length === 0) return;
   submitting = true;
   let batch = [];
   try {
@@ -348,7 +394,7 @@ async function deliver($) {
 }
 
 function scheduleDelivery($) {
-  if (pending.length === 0 || submitting || deliveryScheduled) return;
+  if (localOwned || pending.length === 0 || submitting || deliveryScheduled) return;
   const delay = Math.max(SUBMIT_DEBOUNCE_MS, nextSubmitAt - Date.now());
   deliveryScheduled = true;
   $.clock.after(delay, () => {
@@ -358,7 +404,7 @@ function scheduleDelivery($) {
 }
 
 async function poll($) {
-  if (polling) return;
+  if (localOwned || polling) return;
   polling = true;
   polls += 1;
   try {
@@ -368,6 +414,7 @@ async function poll($) {
       return;
     }
     await loadAcceptedCursor($);
+    if (await connectLocal($)) return;
     const data = await readJson(
       $,
       `${base}/api/inbox?team=${encodeURIComponent(team)}&name=${encodeURIComponent(agentName)}&since_event_id=${lastEventId}`,
@@ -377,6 +424,9 @@ async function poll($) {
     if (messages.length > 0) {
       for (const message of messages) {
         lastEventId = Math.max(lastEventId, Number(message.event_id) || 0);
+        // Even an explicit transport opt-out must not replay a message that a
+        // previous local owner held, refused, or may already have submitted.
+        if (localOutcomes[Number(message.event_id)]) continue;
         pending.push(message);
         recent.push(message);
       }
@@ -395,6 +445,278 @@ async function poll($) {
     // This is intentionally outside the "new messages" branch. A failed
     // submit must get another chance even when the server returns no new mail.
     if (agentId) scheduleDelivery($);
+  }
+}
+
+// Local delivery credentials never appear in URLs or diagnostics. Once a wait
+// may have claimed work, failures cannot re-enable the legacy submitter.
+async function localRequest($, route, body, lease = localLease) {
+  const base = await baseUrl($);
+  const res = await $.http.fetch(`${base}/api/local-delivery/${route}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: {
+      "X-Xats-Delivery-Token": lease.token,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  if (!res || res.ok === false || res.status >= 400) {
+    const error = new Error("local delivery request failed");
+    error.status = res?.status;
+    throw error;
+  }
+  if (typeof res.text === "string") return JSON.parse(res.text || "{}");
+  if (typeof res.json === "function") return await res.json();
+  if (typeof res.text === "function") return JSON.parse(await res.text());
+  throw new Error("invalid local delivery response");
+}
+
+function validGeneration(value) {
+  return (Number.isSafeInteger(value) && value > 0) ||
+    (typeof value === "string" && value.length > 0 && value.length <= 256);
+}
+
+function startLocalOwner($) {
+  localOwned = true;
+  const epoch = localEpoch;
+  $.clock.after(0, () => { if (epoch === localEpoch) void localTick($); });
+  $.clock.every(HEARTBEAT_MS, () => { if (epoch === localEpoch) void renewLocal($); });
+}
+
+async function connectLocal($) {
+  if (localUnsupported || submitting || pending.length ||
+      String(await $.env.get("XATS_LOCAL_DELIVERY")) !== "1") return false;
+  const file = await acceptedCursorPath($);
+  if (!file) return false;
+  try {
+    const lease = JSON.parse(String(await $.fs.read(file.replace(/\.cursor\.json$/, ".delivery.json"))));
+    const expiry = typeof lease.expiresAt === "number" ? lease.expiresAt : Date.parse(lease.expiresAt);
+    if (!validLocalLease(lease) || !Number.isFinite(expiry)) {
+      if (!localCanFallback || Object.keys(localOutcomes).length) {
+        startLocalOwner($);
+        localError = "lease unavailable after prior local delivery; restart the session hook, no polling fallback";
+        return true;
+      }
+      localError = "invalid or expired lease; polling before connection";
+      return false;
+    }
+    // A persisted expiry is only a snapshot. Another mod instance may have
+    // renewed this generation. Never extend it locally without server proof.
+    if (expiry <= Date.now()) await validateLocalLease($, lease);
+    localLease = lease;
+    startLocalOwner($);
+    localError = "";
+    return true;
+  } catch {
+    if (!localCanFallback || Object.keys(localOutcomes).length) {
+      startLocalOwner($);
+      localError = "lease unavailable after prior local delivery; restart the session hook, no polling fallback";
+      return true;
+    }
+    localError = "lease unavailable; polling before connection";
+    return false;
+  }
+}
+
+function validLocalLease(lease) {
+  return lease?.version === 1 && lease.agent_id === agentId &&
+    typeof lease.token === "string" && /^[A-Za-z0-9_-]{43}$/.test(lease.token) &&
+    validGeneration(lease.generation);
+}
+
+async function validateLocalLease($, lease) {
+  const data = await localRequest($, "renew", {}, lease);
+  const expiry = typeof data.expiresAt === "number" ? data.expiresAt : Date.parse(data.expiresAt);
+  if (data.generation !== lease.generation || !Number.isFinite(expiry) || expiry <= Date.now()) {
+    const error = new Error("stale generation or expiry");
+    error.status = 409;
+    throw error;
+  }
+  lease.expiresAt = data.expiresAt;
+}
+
+async function refreshLocalLease($) {
+  const file = await acceptedCursorPath($);
+  const lease = JSON.parse(String(await $.fs.read(file.replace(/\.cursor\.json$/, ".delivery.json"))));
+  if (!validLocalLease(lease)) throw new Error("invalid replacement lease");
+  await validateLocalLease($, lease);
+  if (lease.generation !== localLease?.generation || lease.token !== localLease?.token) {
+    // Old attempt IDs belong to the old capability. Reclaim and reconcile
+    // from the durable per-event journal instead of reusing a stale ACK.
+    localAck = null;
+  }
+  localLease = lease;
+}
+
+function leaseMayHaveChanged(error) {
+  return [401, 403, 409, 410].includes(error?.status);
+}
+
+async function renewLocal($) {
+  if (!localOwned) return;
+  try {
+    if (localLease) await validateLocalLease($, localLease);
+    else await refreshLocalLease($);
+    localError = "";
+  } catch (error) {
+    if (leaseMayHaveChanged(error)) {
+      try { await refreshLocalLease($); localError = ""; return; } catch { /* retain ownership */ }
+    }
+    localError = "lease renewal failed; no polling fallback";
+  }
+}
+
+async function saveLocalAttempt($, hint, stage, accepted = false) {
+  localAttempt = { attempt_id: hint.attempt_id, generation: hint.generation, event_id: hint.event_id, stage };
+  if (["held", "refused", "unknown"].includes(stage)) localOutcomes[hint.event_id] = localAttempt;
+  else delete localOutcomes[hint.event_id];
+  if (accepted) {
+    acceptedEventId = Math.max(acceptedEventId, hint.event_id);
+    lastEventId = Math.max(lastEventId, acceptedEventId);
+  }
+  if (!cursorPath) throw new Error("cursor persistence unavailable");
+  try {
+    await writeCursor($);
+    cursorError = "";
+  } catch {
+    cursorError = "local delivery cursor persistence failed; restart may replay a notice";
+    throw new Error("cursor persistence failed");
+  }
+}
+
+async function processLocalHint($, hint) {
+  // A lost ack repeats the same attempt, not the host submission. Persisted
+  // unknown is intentional: a crash after a write must not cause blind retry.
+  if (localAttempt?.attempt_id === hint.attempt_id && localAttempt.generation === hint.generation) {
+    return localAttempt.stage;
+  }
+  const base = await baseUrl($);
+  const cursor = await readMailboxCursor($, base);
+  if (cursor !== null && cursor >= hint.event_id) {
+    await saveLocalAttempt($, hint, "inbox-consumed");
+    return "inbox-consumed";
+  }
+  if (localOutcomes[hint.event_id]) {
+    // Replacement attempts and generations do not undo prior host outcomes.
+    const stage = localOutcomes[hint.event_id].stage;
+    await saveLocalAttempt($, hint, stage);
+    return stage;
+  }
+  if (hint.event_id <= acceptedEventId) {
+    await saveLocalAttempt($, hint, "transport-written");
+    return "transport-written";
+  }
+  const data = await readJson($,
+    `${base}/api/inbox?team=${encodeURIComponent(team)}&name=${encodeURIComponent(agentName)}&since_event_id=${hint.event_id - 1}`);
+  // A hint claims exactly one event. Do not submit later mailbox entries out
+  // of order while the daemon still owns their delivery attempts.
+  const batch = (Array.isArray(data.messages) ? data.messages : [])
+    .filter((m) => Number(m.event_id) === hint.event_id && (m.id === hint.message_id || m.message_id === hint.message_id));
+  if (!batch.length) throw new Error("hint missing from mailbox");
+  recent.push(...batch);
+  recent = recent.slice(-50);
+  pending = batch;
+  await invalidate($);
+  // Check again immediately before admission: an actual MCP read alone proves
+  // inbox-consumed. Explicit-since mailbox reads above never advance that cursor.
+  const latest = await readMailboxCursor($, base);
+  if (latest !== null && latest >= hint.event_id) {
+    pending = [];
+    await saveLocalAttempt($, hint, "inbox-consumed");
+    return "inbox-consumed";
+  }
+  await saveLocalAttempt($, hint, "unknown"); // durable before touching the host
+  submitAttempts += 1;
+  let stage;
+  try {
+    const result = await $.prompt.submit({ text: payloadText(batch) });
+    stage = result?.ok === true ? "host-queued" : result === undefined ? "transport-written" :
+      result?.stage === "held" || result?.status === "held" ? "held" : "refused";
+  } catch {
+    stage = "unknown";
+  }
+  pending = [];
+  if (stage === "host-queued" || stage === "transport-written") submitOk += 1;
+  lastSubmitError = ["refused", "held", "unknown"].includes(stage) ? `local delivery ${stage}; no automatic resubmit` : "";
+  try {
+    await saveLocalAttempt($, hint, stage, stage === "host-queued" || stage === "transport-written");
+  } catch {
+    // Preserve the real observed stage for ack retries in this process. The
+    // pre-submit journal remains unknown on disk if this final write failed.
+  }
+  await invalidate($);
+  return stage;
+}
+
+async function localTick($) {
+  if (!localOwned || localBusy) return;
+  localBusy = true;
+  const epoch = localEpoch;
+  let delay = 250;
+  try {
+    if (!localLease) await refreshLocalLease($);
+    if (!localAck) {
+      let data;
+      try {
+        data = await localRequest($, "wait?timeout_ms=20000");
+      } catch (error) {
+        // Only explicit unsupported capability BEFORE a successful wait can
+        // choose polling. Auth errors and uncertain waits retain ownership.
+        if (localCanFallback && (error.status === 404 || error.status === 501)) {
+          localUnsupported = true;
+          localOwned = false;
+          localError = "local delivery unsupported; polling";
+          return;
+        }
+        localCanFallback = false;
+        throw error;
+      }
+      localCanFallback = false;
+      localConnected = true;
+      if (data.generation !== localLease.generation || !Array.isArray(data.hints) || data.hints.length > 1) {
+        const error = new Error("invalid generation or hints");
+        error.status = 409;
+        throw error;
+      }
+      const hint = data.hints[0];
+      if (!hint) return;
+      if (hint.generation !== localLease.generation || typeof hint.attempt_id !== "string" || !hint.attempt_id ||
+          typeof hint.message_id !== "string" || !Number.isSafeInteger(hint.event_id) || hint.event_id < 1) {
+        const error = new Error("invalid delivery hint");
+        error.status = 409;
+        throw error;
+      }
+      const token = localLease.token;
+      let stage;
+      try { stage = await processLocalHint($, hint); }
+      catch (error) {
+        // A transient preview/page miss is not a host denial. Leave the claim
+        // unacknowledged so the same hint can be fetched again.
+        if (localAttempt?.attempt_id !== hint.attempt_id || localAttempt.generation !== hint.generation) throw error;
+        stage = localAttempt.stage;
+        localError = "local delivery preparation failed; no polling fallback";
+      }
+      localAck = { attempt_id: hint.attempt_id, stage, generation: hint.generation, token };
+    }
+    if (localAck.generation !== localLease.generation || localAck.token !== localLease.token) {
+      localAck = null;
+      return;
+    }
+    await localRequest($, "ack", { attempt_id: localAck.attempt_id, stage: localAck.stage });
+    localAck = null;
+    localError = "";
+    delay = 0;
+  } catch (error) {
+    if (leaseMayHaveChanged(error) || !localLease) {
+      try { await refreshLocalLease($); } catch { /* retry without changing owner */ }
+    }
+    localError = "local delivery request or generation failed; no polling fallback";
+    delay = 1000;
+  } finally {
+    localBusy = false;
+    if (localOwned && epoch === localEpoch) {
+      $.clock.after(delay, () => { if (epoch === localEpoch) void localTick($); });
+    }
   }
 }
 
@@ -596,6 +918,7 @@ export function register(on, options) {
       `  mailbox:  ${mailboxCursor ?? "unavailable"}${mailboxCursorError ? ` · ${mailboxCursorError}` : ""}`,
       `  pending:  ${pending.length}`,
       `  polls:    ${polls}`,
+      `  local delivery: ${localOwned ? (localConnected ? "connected" : "reconnecting") : "polling"}${localError ? ` · ${localError}` : ""}`,
       `  submit:   ${submitOk}/${submitAttempts} ok, ${submitFailures} consecutive failures`,
       `  retry:    ${nextSubmitAt ? `${Math.max(0, nextSubmitAt - Date.now())}ms` : "none"}`,
       `  submit error: ${lastSubmitError || "none"}`,
@@ -612,10 +935,17 @@ export function register(on, options) {
  */
 export const __internals = {
   poll,
+  localTick,
+  renewLocal,
   deliver,
   bandText,
   copyCommand,
   state: () => ({
+    localOwned,
+    localConnected,
+    localError,
+    localAttempt,
+    localOutcomes,
     agentId,
     agentName,
     team,
@@ -637,6 +967,17 @@ export const __internals = {
     team = value;
   },
   reset() {
+    localEpoch += 1;
+    localOwned = false;
+    localUnsupported = false;
+    localLease = null;
+    localBusy = false;
+    localConnected = false;
+    localCanFallback = true;
+    localError = "";
+    localAttempt = null;
+    localOutcomes = {};
+    localAck = null;
     pending = [];
     recent = [];
     agentId = null;

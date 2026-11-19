@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
 import type { AutoPokeSkipReason } from './auto-poke-fanout.js'
+import { LocalDeliveryStore, type LocalDeliveryRow } from '../storage/local-delivery.js'
 
 export type WakeStatus = 'delivered' | 'retrying' | 'skipped' | 'failed'
 export type DeliverySkipReason =
@@ -96,7 +97,7 @@ export class GetDeliveryStatusService {
   constructor(private db: Database.Database) {}
 
   get(args: { caller: string; message_id: string }):
-    | { message_id: string; statuses: DeliveryStatusRow[] }
+    | { message_id: string; statuses: DeliveryStatusRow[]; local_delivery?: LocalDeliveryRow[] }
     | { error: 'unknown_message' } {
     const owned = this.db.prepare(
       `SELECT 1 AS ok FROM messages WHERE id=? AND from_agent_id=? LIMIT 1`
@@ -109,6 +110,9 @@ export class GetDeliveryStatusService {
        WHERE message_id=?
        ORDER BY agent_id ASC`
     ).all(args.message_id) as DeliveryStatusRow[]
-    return { message_id: args.message_id, statuses: rows }
+    const store = new LocalDeliveryStore(this.db)
+    store.expireLeases()
+    const local = store.listForMessage(args.message_id).filter(row => row.selected === 1)
+    return { message_id: args.message_id, statuses: rows, ...(local.length ? { local_delivery: local } : {}) }
   }
 }

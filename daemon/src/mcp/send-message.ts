@@ -7,7 +7,8 @@ import { parseDeliveryRow, type DeliverySpec } from '../lib/delivery-spec.js'
 import { runFanoutWithRetry } from './fanout-with-retry.js'
 import { recordInitialDeliveryStatuses } from './delivery-status.js'
 import { resolveAgentAddress, type AddressCandidate } from '../storage/agent-ref.js'
-
+import { LocalDeliveryStore } from '../storage/local-delivery.js'
+import { localArrivalHub } from '../daemon/local-arrival.js'
 export type { AutoPokeFn, AutoPokeSkipReason } from './auto-poke-fanout.js'
 
 export type SendMessageDeps = FanoutDeps
@@ -150,6 +151,8 @@ export class SendMessageService {
     }
 
     const baseResult = this.insert({ fromTeam, toTeam, from: input.from, toAgentId: rcpt.agent_id, input })
+    // Wake only after the message and intent transaction commits.
+    localArrivalHub(this.db).publish()
 
     // Wake file for claude-job agents: write .xats-wake so the Monitor fires
     const delivery = parseDeliveryRow(rcpt)
@@ -213,6 +216,9 @@ export class SendMessageService {
       ).run(id, event_id, args.fromTeam, args.toTeam, args.from,
         args.toAgentId,
         null, args.input.subject ?? null, args.input.body, needReply, sent_at)
+      if (args.input.auto_poke !== false && args.from !== args.toAgentId) {
+        new LocalDeliveryStore(this.db).enqueue({ messageId: id, agentId: args.toAgentId, eventId: event_id })
+      }
       return { message_id: id, event_id, sent_at }
     })
     const { message_id, event_id, sent_at } = tx()

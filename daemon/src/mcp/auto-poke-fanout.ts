@@ -3,7 +3,7 @@ import { isTmuxAvailable } from '../daemon/tmux-cli.js'
 import { scheduleRetry as defaultScheduleRetry, type RetryAgentLookup, type RetryContext } from './poke-retry.js'
 import type { DeliverySpec } from '../lib/delivery-spec.js'
 
-export type AutoPokeSkipReason = 'no_pane' | 'guard_failed' | 'tmux_unavailable' | 'self'
+export type AutoPokeSkipReason = 'no_pane' | 'guard_failed' | 'tmux_unavailable' | 'self' | 'local_adapter'
 
 export interface AutoPokeArgs {
   team: string

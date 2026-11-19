@@ -1,6 +1,8 @@
 # Local-first xats delivery
 
-Status: proposed design, not implemented. Existing transports remain unchanged.
+Status: design with an opt-in Claude connected-adapter implementation. See
+[implementation and limits](local-first-implementation.md). Native UDS and other
+host upgrades remain gated. Existing default transports remain unchanged.
 
 ## Decision
 

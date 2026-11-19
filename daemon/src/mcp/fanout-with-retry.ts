@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import { fanoutAutoPoke, type AutoPokeRecipient, type AutoPokeSkipReason, type FanoutDeps } from './auto-poke-fanout.js'
 import { RETRY_DELAYS_S } from './poke-retry.js'
 import { recordInitialDeliveryStatuses, updateDeliveryStatus } from './delivery-status.js'
+import { LocalDeliveryStore } from '../storage/local-delivery.js'
 
 export interface FanoutResultEnvelope {
   poked: boolean
@@ -23,10 +24,14 @@ export async function runFanoutWithRetry(args: {
   sentAt: string
 }): Promise<FanoutResultEnvelope> {
   const { db } = args
+  const store = new LocalDeliveryStore(db)
+  const localRecipients = args.recipients.filter(r => store.ownsDelivery(args.messageId, r.agent_id))
+  const localIds = new Set(localRecipients.map(r => r.agent_id))
   const fanout = await fanoutAutoPoke({
     team: args.team,
     fromAgentId: args.fromAgentId,
-    recipients: args.recipients,
+    // A claimed local owner must never also get a terminal/API legacy poke.
+    recipients: args.recipients.filter(r => !localIds.has(r.agent_id)),
     body: args.body,
     deps: args.deps,
     retry: {
@@ -44,12 +49,12 @@ export async function runFanoutWithRetry(args: {
     messageId: args.messageId,
     recipients: args.recipients.map(r => r.agent_id),
     delivered: new Set(fanout.deliveredAgentIds),
-    skipped: fanout.skipReasons
+    skipped: [...fanout.skipReasons, ...localRecipients.map(r => ({ agent_id: r.agent_id, reason: 'local_adapter' as const }))]
   })
   const retry_scheduled = fanout.retryScheduledCount > 0
   return {
     poked: fanout.poked,
-    poke_skip_reasons: fanout.skipReasons,
+    poke_skip_reasons: [...fanout.skipReasons, ...localRecipients.map(r => ({ agent_id: r.agent_id, reason: 'local_adapter' as const }))],
     retry_scheduled,
     ...(retry_scheduled ? { retry_delays_s: [...RETRY_DELAYS_S] } : {})
   }

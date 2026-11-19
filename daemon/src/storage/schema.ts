@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3'
+import { initLocalDeliverySchema } from './local-delivery.js'
 
 const DDL = [
   `CREATE TABLE IF NOT EXISTS events (
@@ -263,6 +264,7 @@ export function applySchema(
   // Zero is a valid unread cursor, not an uninitialized migration sentinel.
   // Schema initialization must never consume mail; actual inbox reads do that.
   migrateClaudeBindCodeColumns(db)
+  initLocalDeliverySchema(db)
 }
 
 // The bind code lets the MODEL claim a session (a tool call it authored, which

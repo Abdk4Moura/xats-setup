@@ -1,5 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { AgentsRepo } from '../storage/agents-repo.js'
+import { LocalDeliveryStore } from '../storage/local-delivery.js'
+import { localArrivalHub } from '../daemon/local-arrival.js'
 
 export interface InboxMessage {
   id: string
@@ -54,7 +56,7 @@ export class GetInboxService {
            LEFT JOIN agents a ON a.agent_id = m.from_agent_id
           WHERE m.to_team = ?
             AND m.event_id > ?
-            AND ( m.to_agent_id = ? OR (m.to_role IS NOT NULL AND m.to_role = ?) )
+            AND ( m.to_agent_id = ? OR (m.to_agent_id IS NULL AND m.to_role IS NOT NULL AND m.to_role = ?) )
           ORDER BY m.event_id ASC
           LIMIT ?`
       ).all(callerTeam, effectiveSince, args.caller, callerRole ?? '__none__', limit + 1) as Array<
@@ -73,8 +75,11 @@ export class GetInboxService {
             WHERE agent_id = ? AND last_processed_event_id < ?`
         ).run(last_event_id, args.caller, last_event_id)
       }
+      if (implicit) new LocalDeliveryStore(this.db).consumeThrough(args.caller, last_event_id)
       return { messages: trimmed, has_more, last_event_id }
     })
-    return tx()
+    const result = tx()
+    if (implicit) localArrivalHub(this.db).publish()
+    return result
   }
 }

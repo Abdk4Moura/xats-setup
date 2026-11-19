@@ -46,6 +46,8 @@ const host = os.hostname().split('.')[0];
 const sessionDir = path.join(os.homedir(), '.xats', 'sessions');
 const idFileFor = (tag) => path.join(sessionDir, `${createHash('sha256').update(tag).digest('hex')}.id`);
 const bindFileFor = (tag) => path.join(sessionDir, `${createHash('sha256').update(tag).digest('hex')}.bind`);
+const deliveryFileFor = (tag) => /^[A-Za-z0-9_-]{1,128}$/.test(tag)
+  ? path.join(sessionDir, `${tag}.delivery.json`) : null;
 
 function ensurePrivateCursorFile(tag, agentId) {
   // The mod uses this same session-key filename. Its sandboxed $.fs.write has
@@ -145,6 +147,11 @@ async function start() {
   // as the Pi and opencode adapters do.
   const body = { name: id.name, team: TEAM, agent_type: 'claude-code', session_key: id.sessionKey ?? undefined, name_mode: id.mode, bind_mcp: Boolean(id.sessionKey) };
   if (id.delivery) body.delivery = id.delivery;
+  // Explicit opt-in only. Never expose the adapter capability in model context.
+  const deliveryFile = deliveryFileFor(id.tag);
+  if (process.env.XATS_LOCAL_DELIVERY === '1' && id.sessionKey && deliveryFile && !id.delivery) {
+    body.local_delivery = true;
+  }
   const resp = await post('/api/register', body);
   const agentId = resp && resp.agent_id;
   if (!agentId) return; // daemon unreachable — silently continue
@@ -156,6 +163,16 @@ async function start() {
     // fails closed: the MCP hook never guesses another session's identity.
     fs.writeFileSync(bindFileFor(id.tag), resp.bind_token, { mode: 0o600 });
     try { fs.chmodSync(bindFileFor(id.tag), 0o600); } catch { /* Windows ACLs differ */ }
+  }
+  if (deliveryFile) {
+    const lease = resp.local_delivery;
+    if (body.local_delivery && lease && /^[A-Za-z0-9_-]{43}$/.test(lease.token) &&
+        Number.isSafeInteger(lease.generation) && lease.generation > 0) {
+      fs.writeFileSync(deliveryFile, `${JSON.stringify({ version: 1, agent_id: agentId, ...lease })}\n`, { mode: 0o600 });
+      try { fs.chmodSync(deliveryFile, 0o600); } catch { /* Windows ACLs differ */ }
+    } else {
+      try { fs.unlinkSync(deliveryFile); } catch { /* opt-out or old daemon */ }
+    }
   }
   ensurePrivateCursorFile(id.tag, agentId);
   // The daemon is authoritative and may have disambiguated the name (name-2) or
@@ -188,6 +205,8 @@ async function end() {
   const evt = await readEvent();
   const id = identity(evt);
   const f = idFileFor(id.tag);
+  const deliveryFile = deliveryFileFor(id.tag);
+  if (deliveryFile) { try { fs.unlinkSync(deliveryFile); } catch { /* absent */ } }
   let agentId = null;
   try { agentId = fs.readFileSync(f, 'utf8').trim(); } catch { /* nothing to do */ }
   if (agentId) {
