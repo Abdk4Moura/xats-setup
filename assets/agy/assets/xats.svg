@@ -1,10 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Cross-Agent Teams">
-  <rect x="8" y="8" width="112" height="112" rx="28" fill="#211f35"/>
-  <path d="M37 43h54M37 85h54M42 43v42m44-42v42" fill="none" stroke="#a78bfa" stroke-width="7" stroke-linecap="round"/>
-  <circle cx="37" cy="43" r="12" fill="#f4f1ff"/>
-  <circle cx="91" cy="43" r="12" fill="#f4f1ff"/>
-  <circle cx="37" cy="85" r="12" fill="#f4f1ff"/>
-  <circle cx="91" cy="85" r="12" fill="#f4f1ff"/>
-  <circle cx="64" cy="64" r="9" fill="#c4b5fd"/>
-  <path d="M37 43l27 21 27-21M37 85l27-21 27 21" fill="none" stroke="#a78bfa" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title desc"><title id="title">xats app icon</title><desc id="desc">The xats Cross-Agent Teams logo.</desc><rect width="512" height="512" rx="104" fill="#0b0d10"/><g transform="translate(-116.363636 -116.363636) scale(0.363636363636)"><path fill="#7fb4ff" d="M448 510H780L990 728L900 822L726 642H590L990 1060L900 1154L448 680Z"/><path fill="#7fb4ff" d="M448 1368L740 1060L830 1154L590 1405H726L1060 1060L1150 1154L780 1536H448Z"/><path fill="#7ad3a4" d="M1600 510H1264L900 896L990 990L1322 642H1458L1218 896L1308 990L1600 680Z"/><path fill="#7ad3a4" d="M1600 1368L1150 896L1060 990L1458 1405H1322L1150 1226L1060 1320L1264 1536H1600Z"/></g></svg>
