@@ -114,7 +114,7 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   }, orphanGcIntervalMs)
   if (typeof orphanGcInterval.unref === 'function') orphanGcInterval.unref()
 
-  // Agent TTL reaper: retain keyed Claude mailboxes as offline, deregister the rest.
+  // Presence reaper: every agent type becomes offline, none loses its identity.
   // REST-registered agents (delivery=none) have no persistent connection, so they
   // rely on periodic heartbeat (POST /api/heartbeat) to stay alive. Agents tied to
   // a persistent MCP session (channel_session_id) should be reaped on disconnect
@@ -125,9 +125,9 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   const agentReaper = setInterval(() => {
     try {
       const cutoff = new Date(Date.now() - agentTtlMs).toISOString()
-      const count = agentsRepo.deleteOlderThan(cutoff)
+      const count = agentsRepo.markStaleOffline(cutoff)
       if (count > 0) {
-        console.log(`[reaper] removed ${count} stale agent(s) older than ${agentTtlMs}ms`)
+        console.log(`[reaper] marked ${count} agent(s) offline after ${agentTtlMs}ms; identities retained`)
       }
     } catch { /* best-effort */ }
   }, agentReapIntervalMs)

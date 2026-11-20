@@ -6,6 +6,7 @@ import type { AutoPokeSkipReason, FanoutDeps } from './auto-poke-fanout.js'
 import { parseDeliveryRow, type DeliverySpec } from '../lib/delivery-spec.js'
 import { runFanoutWithRetry } from './fanout-with-retry.js'
 import { recordInitialDeliveryStatuses } from './delivery-status.js'
+import { resolveAgentAddress, type AddressCandidate } from '../storage/agent-ref.js'
 
 export type { AutoPokeFn, AutoPokeSkipReason } from './auto-poke-fanout.js'
 
@@ -38,6 +39,8 @@ export type SendResult =
   | { error: 'ambiguous_recipient' }
   | { error: 'missing_recipient' }
   | { error: 'invalid_to_agent_name' }
+  | { error: 'ambiguous_address'; candidates: AddressCandidate[] }
+  | { error: 'ref_not_found'; candidates: AddressCandidate[] }
 
 interface RecipientPokeRow {
   agent_id: string
@@ -79,6 +82,25 @@ export class SendMessageService {
     private deps: SendMessageDeps = {}
   ) {}
 
+  /**
+   * Team-scoped address resolution. `name [ref]` is authoritative; a bare name
+   * (or legacy `name:device`) resolves only when unambiguous. Ambiguity is
+   * reported with candidates instead of silently picking one.
+   */
+  private resolveAddress(raw: string, team: string, localDevice: string): string | SendResult {
+    const legacy = parseToAgentName(raw, localDevice)
+    if ('error' in legacy) return legacy
+    if (!raw.trim().endsWith(']')) {
+      const hit = this.agents.findByIdentity({ device: legacy.ok.device, team, name: legacy.ok.name })
+      return hit ? hit.agent_id : { error: 'unknown_recipient' }
+    }
+    const roster = this.db.prepare(
+      `SELECT agent_id, device, name FROM agents WHERE team=? AND role != '__channel_proxy__'`
+    ).all(team) as Array<{ agent_id: string; device: string; name: string }>
+    const resolved = resolveAgentAddress(raw, roster, { localDevice })
+    return 'error' in resolved ? resolved : resolved.agent_id
+  }
+
   async send(input: SendInput): Promise<SendResult> {
     const hasId = typeof input.to_agent_id === 'string' && input.to_agent_id.length > 0
     const hasName = typeof input.to_agent_name === 'string' && input.to_agent_name.length > 0
@@ -93,15 +115,9 @@ export class SendMessageService {
     if (hasId) {
       resolvedId = input.to_agent_id!
     } else {
-      const parsed = parseToAgentName(input.to_agent_name!, fromRow.device)
-      if ('error' in parsed) return parsed
-      const hit = this.agents.findByIdentity({
-        device: parsed.ok.device,
-        team: toTeam,
-        name: parsed.ok.name,
-      })
-      if (!hit) return { error: 'unknown_recipient' }
-      resolvedId = hit.agent_id
+      const resolved = this.resolveAddress(input.to_agent_name!, toTeam, fromRow.device)
+      if (typeof resolved !== 'string') return resolved
+      resolvedId = resolved
     }
 
     const rcpt = this.db.prepare(

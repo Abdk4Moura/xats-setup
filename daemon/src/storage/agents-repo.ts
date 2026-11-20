@@ -291,10 +291,10 @@ export class AgentsRepo {
          model = excluded.model,
          session_key = COALESCE(excluded.session_key, session_key),
          last_seen_at = excluded.last_seen_at,
-         offline_since = CASE
-           WHEN excluded.agent_type = 'claude-code' AND excluded.session_key IS NOT NULL THEN NULL
-           ELSE offline_since
-         END,
+         -- Registering/heartbeating proves presence again for EVERY agent type.
+         -- Retained-but-offline rows must not stay offline forever after a
+         -- reconnect, and identity is never reassigned to do that.
+         offline_since = NULL,
          tmux_pane_id = COALESCE(excluded.tmux_pane_id, tmux_pane_id),
          claude_ui_pid = COALESCE(excluded.claude_ui_pid, claude_ui_pid),
          runtime_ui_pid = COALESCE(excluded.runtime_ui_pid, runtime_ui_pid),
@@ -448,27 +448,28 @@ export class AgentsRepo {
     this.db.prepare(`UPDATE agents SET last_seen_at=? WHERE agent_id=?`).run(new Date().toISOString(), agent_id)
   }
 
-  /** Retain Claude keyed mailboxes; mark their first TTL expiry as offline. */
-  deleteOlderThan(threshold: string): number {
+  /**
+   * Presence expiry for every agent type: mark offline, never delete identity.
+   *
+   * A TTL miss means "not reachable right now", not "this mailbox never
+   * existed". Keeping the row means a reconnecting or resuming session keeps
+   * its agent_id and mail, and the roster can still address it. Hard removal is
+   * a separate, much longer retention decision in runCleanup.
+   */
+  markStaleOffline(threshold: string): number {
     return this.db.transaction(() => {
-      this.db.prepare(
+      const marked = this.db.prepare(
         `UPDATE agents SET offline_since = ?
-         WHERE last_seen_at < ? AND agent_type = 'claude-code'
-           AND session_key IS NOT NULL AND offline_since IS NULL`
+         WHERE last_seen_at < ? AND offline_since IS NULL`
       ).run(new Date().toISOString(), threshold)
-      // TTL expiry also revokes the bearer capability. A later resume issues
-      // a fresh one, while the offline mailbox row and agent_id remain intact.
+      // Presence expiry also revokes live bind capabilities. A later resume
+      // issues a fresh one, while the offline mailbox row and agent_id remain.
       this.db.prepare(
         `DELETE FROM claude_bind_capabilities
          WHERE agent_id IN (SELECT agent_id FROM agents
-                            WHERE agent_type='claude-code' AND session_key IS NOT NULL
-                              AND offline_since IS NOT NULL AND last_seen_at < ?)`
+                            WHERE offline_since IS NOT NULL AND last_seen_at < ?)`
       ).run(threshold)
-      const result = this.db.prepare(
-        `DELETE FROM agents WHERE last_seen_at < ?
-         AND (agent_type IS NOT 'claude-code' OR session_key IS NULL)`
-      ).run(threshold)
-      return result.changes
+      return Number(marked.changes)
     })()
   }
 

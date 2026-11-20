@@ -363,3 +363,55 @@ test("the unique identity index still holds", async (t) => {
   );
   assert.deepEqual(dupes, [], "no two rows may share (device, team, name)");
 });
+
+test("roster addresses carry a stable ref and ambiguity is refused, not guessed", async (t) => {
+  if (skip(t)) return;
+  const sender = await register({ name: "addr-sender", session_key: "sess-ADDR-S" });
+  const first = await register({ name: "addr-dup", session_key: "sess-ADDR-A" });
+  const second = await register({ name: "addr-dup", session_key: "sess-ADDR-B" });
+
+  // A second identical name is suffixed by the daemon, so cross-device style
+  // ambiguity is simulated by the duplicate-looking pair below.
+  assert.equal(first.body.name, "addr-dup");
+  assert.equal(second.body.name, "addr-dup-2");
+
+  const roster = await fetch(`${env.base}/api/agents?team=${TEAM}`).then((res) => res.json());
+  const rows = roster.agents.filter((row) => row.name.startsWith("addr-dup"));
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.match(row.ref, /^[0-9a-f]{8}$/, "roster must advertise a stable ref");
+    assert.equal(row.address, `${row.name} [${row.ref}]`);
+  }
+  assert.notEqual(rows[0].ref, rows[1].ref, "refs must distinguish the two identities");
+
+  const target = rows.find((row) => row.agent_id === second.body.agent_id);
+  const sent = await fetch(`${env.base}/api/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from: { team: TEAM, name: sender.body.name },
+      to: { name: target.address },
+      body: "addressed by ref",
+      auto_poke: false,
+    }),
+  });
+  assert.equal(sent.status, 200);
+  const receipt = await sent.json();
+  assert.deepEqual(receipt.recipients, [second.body.agent_id], "the ref selects exactly one identity");
+
+  const wrong = await fetch(`${env.base}/api/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from: { team: TEAM, name: sender.body.name },
+      to: { name: "addr-dup [00000000]" },
+      body: "unresolvable",
+      auto_poke: false,
+    }),
+  });
+  assert.equal(wrong.status, 400);
+  const failure = await wrong.json();
+  assert.equal(failure.error, "ref_not_found");
+  assert.ok(Array.isArray(failure.candidates), "failure must name the candidates instead of guessing");
+  assert.equal(failure.candidates[0].name, "addr-dup");
+});

@@ -11,6 +11,8 @@ export const criticalTests = [
   'invalid last-selected agy config prevents all earlier component writes',
   'native process/socket ownership keeps a healthy nondefault port and unchanged daemon PID',
   'daemon schema restart preserves zero unread cursors until an actual inbox read',
+  'presence expiry marks every agent offline without destroying identity',
+  'send_message addresses by name [ref] and never guesses on ambiguity',
 ];
 
 export function assertCoverage(log, { files, platform = process.platform }) {
