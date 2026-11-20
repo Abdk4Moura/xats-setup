@@ -118,3 +118,37 @@ The benchmark measures loopback arrival hints against a deterministic simulation
 of the old 3-second polling interval. It does not measure model latency, actual
 Claude host queue admission, native UDS, or production host CPU overhead. Keep
 those distinctions when reporting results.
+
+## Live acceptance without a provider account
+
+`scripts/acceptance-local-first.mjs` is the acceptance check that needs a real
+host, but not a real model or API key. It starts an owned daemon in a throwaway
+`HOME`, seeds one mailbox message, and then runs the **real Claude Code CLI**
+against a local Anthropic-shaped stub. The stub only chooses which tool to call;
+the CLI performs genuine MCP round trips.
+
+```sh
+npm run build:daemon
+node scripts/acceptance-local-first.mjs     # XATS_CLAUDE=/path/to/claude to pin
+```
+
+It asserts three things that a unit test cannot:
+
+1. **Tool schemas and handshake work on a real host.** The model turn receives
+   `mcp__cross-agent-teams__get_inbox` / `send_message` and the tool results come
+   back through the CLI, not a simulated transport.
+2. **Attribution survives the round trip.** The inbox tool result contains the
+   seeded body and the sender name, and the reply is stored back in the sender's
+   mailbox attributed to the receiver's `agent_id`.
+3. **Recovery is clean.** After a daemon restart the same registrations and
+   mailbox rows exist and the reply is not duplicated.
+
+Scope limits, stated deliberately:
+
+- The model is a deterministic stub. This proves CLI, MCP, schema, and mailbox
+  wiring, not model reasoning, comprehension, or task completion.
+- No provider credentials are used and every request goes to `127.0.0.1`; the
+  stub answers from the tool catalog it is given.
+- It does not exercise the host's own timeout, busy, or approval UI. Those remain
+  manual checks against a real interactive session, because a stub cannot prove
+  host rendering.
