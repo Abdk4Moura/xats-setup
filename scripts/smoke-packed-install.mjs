@@ -10,7 +10,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const repo = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-packed-smoke-'));
+// Use the runner's build scratch disk, not the Windows user-profile temp disk.
+const scratch = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'xats-packed-smoke-'));
 const home = path.join(scratch, 'home');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const components = 'claude,codex,pi,omp,opencode,mimocode,agy,bridge';
@@ -99,7 +100,7 @@ try {
   // Do not pass real host config overrides, provider tokens, or npm credentials
   // into the executable under test. Keep only executable/OS plumbing.
   const plumbing = Object.fromEntries(['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'ComSpec', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP', 'TMPDIR', 'LANG'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
-  const env = { ...plumbing, NODE_OPTIONS: '--max-old-space-size=256', HOME: home, USERPROFILE: home, CROSS_AGENT_TEAMS_MCP_HOME: path.join(home, '.cross-agent-teams-mcp'), XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share'), XDG_STATE_HOME: path.join(home, '.local/state'), XDG_CACHE_HOME: path.join(home, '.cache'), npm_config_cache: npmCache, npm_config_loglevel: 'http', npm_config_timing: 'true', npm_config_userconfig: path.join(home, '.npmrc'), npm_config_globalconfig: path.join(home, 'global.npmrc'), CI: '1', XATS_OPENCODE_V2: '1' };
+  const env = { ...plumbing, NODE_OPTIONS: '--max-old-space-size=256', HOME: home, USERPROFILE: home, CROSS_AGENT_TEAMS_MCP_HOME: path.join(home, '.cross-agent-teams-mcp'), XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share'), XDG_STATE_HOME: path.join(home, '.local/state'), XDG_CACHE_HOME: path.join(home, '.cache'), npm_config_cache: npmCache, npm_config_prefer_offline: 'true', npm_config_loglevel: 'http', npm_config_timing: 'true', npm_config_userconfig: path.join(home, '.npmrc'), npm_config_globalconfig: path.join(home, 'global.npmrc'), CI: '1', XATS_OPENCODE_V2: '1' };
   delete env.XATS_BASE;
   delete env.XATS_BASE_URL;
   delete env.XATS_PORT;
@@ -110,7 +111,16 @@ try {
   // resolve the shipped bin rather than any local project installation.
   await execute(npm, [...args, '--dry-run'], env, 'initial dry-run', home);
   assert.deepEqual(snapshot(home), originals, 'dry-run must not change preconfigured home, including file modes');
+  const oldTimings = new Set(fs.readdirSync(path.join(npmCache, '_logs')).filter(name => name.endsWith('-timing.json')));
   await execute(npm, args, env, 'first install', home);
+  for (const name of fs.readdirSync(path.join(npmCache, '_logs')).filter(name => name.endsWith('-timing.json') && !oldTimings.has(name))) {
+    const timing = JSON.parse(fs.readFileSync(path.join(npmCache, '_logs', name), 'utf8'));
+    const command = timing.metadata?.command || [];
+    if (command[0] !== 'install') continue;
+    // Print durations only, never npm configuration, auth, or command arguments.
+    const slow = Object.fromEntries(Object.entries(timing.timers || {}).filter(([, ms]) => ms >= 500));
+    console.log(`[packed-smoke] dependency npm slow timers: ${JSON.stringify(slow)}`);
+  }
   await execute(process.execPath, [path.join(home, '.config/mimocode/verify-plugin.mjs')], env, 'legacy SDK import', home);
   for (const name of ['.pi/agent/extensions/xats.ts', '.omp/agent/extensions/xats.ts', '.config/opencode/plugins/xats-register.ts', '.gemini/config/plugins/xats/plugin.json', '.gemini/config/plugins/xats/skills/xats/SKILL.md']) assert.ok(fs.existsSync(path.join(home, name)), `installed bin missing ${name}`);
   assert.equal(json('.claude/settings.json').env.CUSTOM_SENTINEL, 'keep');
