@@ -14,7 +14,8 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-packed-smoke-'));
 const home = path.join(scratch, 'home');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const components = 'claude,codex,pi,omp,opencode,mimocode,agy,bridge';
-function execute(command, args, env = process.env) {
+function execute(command, args, env = process.env, label = args[0]) {
+  const started = Date.now();
   return new Promise((resolve, reject) => {
     // npm.cmd requires cmd.exe. Quote every argument, including the tarball
     // path, because Windows runner temp directories can contain spaces.
@@ -27,7 +28,11 @@ function execute(command, args, env = process.env) {
     child.stderr.on('data', b => { output += b; });
     const timer = setTimeout(() => { child.kill(); reject(new Error(`command timed out: ${command}`)); }, 180000);
     child.once('error', error => { clearTimeout(timer); reject(error); });
-    child.once('exit', code => { clearTimeout(timer); code === 0 ? resolve(stdout) : reject(new Error(`${command} exited ${code}\n${output.slice(-5000)}`)); });
+    child.once('exit', code => {
+      clearTimeout(timer);
+      console.log(`[packed-smoke] ${label}: ${((Date.now() - started) / 1000).toFixed(2)}s (exit ${code})`);
+      code === 0 ? resolve(stdout) : reject(new Error(`${command} exited ${code}\n${output.slice(-5000)}`));
+    });
   });
 }
 function seed(relative, text) {
@@ -91,9 +96,9 @@ try {
   delete env.XATS_LABEL;
   const args = ['exec', '--yes', '--prefer-offline', `--package=${tarball}`, '--', 'xats-setup', `--only=${components}`, '--yes', '--no-ephemeral', '--label', 'packed-smoke'];
 
-  await execute(npm, [...args, '--dry-run'], env);
+  await execute(npm, [...args, '--dry-run'], env, 'initial dry-run');
   assert.deepEqual(snapshot(home), originals, 'dry-run must not change preconfigured home, including file modes');
-  await execute(npm, args, env);
+  await execute(npm, args, env, 'first install');
   for (const name of ['.pi/agent/extensions/xats.ts', '.omp/agent/extensions/xats.ts', '.config/opencode/plugins/xats-register.ts', '.gemini/config/plugins/xats/plugin.json', '.gemini/config/plugins/xats/skills/xats/SKILL.md']) assert.ok(fs.existsSync(path.join(home, name)), `installed bin missing ${name}`);
   assert.equal(json('.claude/settings.json').env.CUSTOM_SENTINEL, 'keep');
   assert.ok(json('.claude/settings.json').hooks.SessionStart.some(group => group.hooks.some(hook => hook.command === 'echo user-hook')));
@@ -113,14 +118,14 @@ try {
   const commentBackup = fs.readdirSync(path.join(home, '.config/opencode')).filter(name => name.startsWith('opencode.jsonc.') && name !== 'opencode.jsonc');
   assert.ok(commentBackup.some(name => fs.readFileSync(path.join(home, '.config/opencode', name), 'utf8').includes('// user comment')), 'original JSONC comments must have a recoverable backup');
 
-  await execute(npm, args, env);
+  await execute(npm, args, env, 'repeat install');
   const second = snapshot(home);
   // The install manifest intentionally records each completed run's timestamp.
   delete first[path.normalize('.xats/manifest.json')];
   delete second[path.normalize('.xats/manifest.json')];
   assert.deepEqual(second, first, 'identical rerun must preserve contents and avoid accumulating backups');
   const beforeDry = snapshot(home);
-  await execute(npm, [...args, '--dry-run'], env);
+  await execute(npm, [...args, '--dry-run'], env, 'upgrade dry-run');
   assert.deepEqual(snapshot(home), beforeDry, 'upgrade dry-run changed existing files');
   console.log(`Packed npm-bin install, rerun, dry-run, and preservation passed (${process.platform}/${process.arch}).`);
 } finally {
