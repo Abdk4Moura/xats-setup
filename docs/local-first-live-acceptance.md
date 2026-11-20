@@ -1,0 +1,82 @@
+# Local-first live acceptance on a real Claude Code host
+
+Status: run on 2026-11-20 against Claude Code 2.1.295 (Opus, Max account) on this
+VPS, in isolated rigs. This is the interactive acceptance PR #10 was waiting for.
+It is a real host and a real model; it is not a stub.
+
+## Rig setup
+
+Two rigs, both isolated from the production bus:
+
+- Rig 1: daemon without opt-in, i.e. the default delivery path.
+- Rig 2: `XATS_LOCAL_DELIVERY=1` on **both** the daemon and the Claude process.
+
+Each rig had its own `CROSS_AGENT_TEAMS_MCP_HOME`, database, port, project
+directory, and tmux session. Claude ran with `--setting-sources ''` plus explicit
+`--settings` hooks pointing at `assets/claude/xats-hook.mjs`, `--plugin-dir`
+`assets/claude/mod`, `--strict-mcp-config` with a single MCP entry for the rig
+daemon, and `XATS_BASE` pinned so the hook could not fall back to `~/.xats/port`.
+
+Evidence kept in this directory: `daemon.log`, `data.db` (rig 1),
+`daemon-local-first.log`, `data-local-first.db` (rig 2), `cursor.json`.
+
+## Verified working
+
+1. Registration and model-authored bind both work. The model reported the bind
+   in its own words, and `leases` shows one bound session.
+2. Identity survives a daemon restart: the same `agent_id` came back, matching
+   the retention change merged earlier.
+3. **Local-first delivery works end to end** when `auto_poke` is left at its
+   default. The send created an outbox row, the plugin claimed it (`claimed`
+   fact), attempted the host submit, and the model acted on the message:
+   - outbox row reconciled to `inbox-consumed`, generation 1
+   - mailbox cursor advanced 0 -> 2
+   - the model quoted the sender and the subject it had actually received
+4. The host renders the peer message with its own framing line ("This is how
+   Claude Code surfaces a prompt a plugin submits between turns - it starts this
+   turn in the user's place") rather than faking the person's words.
+5. No composer injection. The text that looked like a composer draft in an
+   earlier observation is the TUI's suggested-prompt placeholder, not inserted
+   message text.
+
+## Gaps found (these keep PR #10 in draft)
+
+1. **A host submit refusal is recorded and then delivery still happens.**
+   Facts for one attempt were `claimed` -> `refused` (about 300 ms later) ->
+   `inbox-consumed`. `register.js` maps a non-ok `$.prompt.submit` result to
+   `refused`, and the message was subsequently read through the inbox path. The
+   design says a refusal is terminal and must not be routed around, so either
+   the refusal cause needs to be distinguished (busy vs policy) or the fallback
+   must not run after a refusal.
+2. **`auto_poke:false` skips local-first enqueue entirely.**
+   `send-message.ts` enqueues only when `auto_poke !== false`, so those messages
+   bypass the local-first owner and arrive later through the polling path. That
+   means two delivery owners depending on a send flag, which is exactly what the
+   one-owner rule is meant to prevent.
+3. **No automatic recovery after a daemon restart.** The host showed
+   `MCP server "cross-agent-teams" disconnected · open /mcp to reconnect`; the
+   cursor did not advance and pending outbox rows stayed `stored` with no lease
+   generation until a manual reconnect. Observed in both rigs.
+4. **A reply to an aged-out sender is lost.** Replying to a REST-registered
+   sender older than the 180 s reachability window failed with `unreachable` and
+   queued nothing. The model reported this honestly; the reply itself was not
+   preserved for later delivery.
+
+## Operator notes
+
+- Two restart attempts failed with `daemon already running pid=...` because the
+  replacement started while the old process was still shutting down and its pid
+  file existed. Waiting for the pid file to disappear, or retrying after the old
+  process exits, is required. This is the documented fail-closed behaviour, not
+  a new bug.
+- Driving the TUI needs `tmux send-keys ... C-m`; a bare `Enter` was swallowed.
+- Pointing a rig at the production bus is easy to do by accident: the hook reads
+  `XATS_BASE`, not `XATS_PORT`. During setup two throwaway agents registered on
+  the production bus and were deregistered immediately; production is back to
+  its prior agent count with no residue.
+
+## What would let PR #10 merge
+
+Fix items 1 and 2 (single delivery owner, refusal handling), make item 3 recover
+automatically or document the manual reconnect as intended, and decide whether
+item 4 should queue instead of failing.
