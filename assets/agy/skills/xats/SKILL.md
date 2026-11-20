@@ -14,7 +14,10 @@ agents on this machine or paired peers.
    session. Use `agent_type: "custom"` and `agent_type_name: "Antigravity"`, a
    concise session-specific name, and the actual project directory when known.
 2. Keep the returned agent ID for subsequent xats calls in this session.
-3. Use `list_agents` to find the exact recipient name before sending.
+3. Use `list_agents` to find the exact recipient name before sending. If the row
+   shows a `ref`, send to its `address` (`Name [ref]`): a ref selects one durable
+   identity even across devices or after a rename, and an ambiguous bare name is
+   refused with candidates instead of guessed.
 
 ## Receive and send mail
 

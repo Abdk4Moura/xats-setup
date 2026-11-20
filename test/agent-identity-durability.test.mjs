@@ -25,7 +25,8 @@ async function load(t) {
     export { SendMessageService } from './daemon/src/mcp/send-message.ts';
     export { listAgentsForTeam } from './daemon/src/mcp/list-agents.ts';
     export { runCleanup } from './daemon/src/daemon/cleanup.ts';
-    export { assignAgentRefs, parseAgentAddress, resolveAgentAddress, formatAgentAddress } from './daemon/src/storage/agent-ref.ts';
+    export { agentRefPrefix, assignAgentRefs, parseAgentAddress, resolveAgentAddress, formatAgentAddress } from './daemon/src/storage/agent-ref.ts';
+    export { safeRosterAgent } from './lib/peer-federation.mjs';
   `, resolveDir: repo, loader: 'ts' }, outfile: file, bundle: true, platform: 'node', format: 'esm', packages: 'external', logLevel: 'silent' });
   return import(pathToFileURL(file).href);
 }
@@ -132,4 +133,34 @@ test('send_message addresses by name [ref] and never guesses on ambiguity', { sk
   const mismatch = await service.send({ from: sender.agent_id, to_agent_name: `dup [${'0'.repeat(8)}]`, body: 'x', auto_poke: false });
   assert.equal(mismatch.error, 'ref_not_found');
   assert.ok(refA !== refB);
+});
+
+test('refs stay prefix-stable across roster sizes, so remote refs still resolve', { skip: !Database }, async t => {
+  const { assignAgentRefs, resolveAgentAddress, agentRefPrefix } = await load(t);
+  // `id-10014` and `id-22672` share the 8-char prefix c9184ee7, so a roster
+  // containing both must widen. Hardcoded so the case is deterministic.
+  assert.equal(agentRefPrefix('id-10014', 8), agentRefPrefix('id-22672', 8));
+  const small = ['zeta', 'alpha'];
+  const big = [...small, 'id-10014', 'id-22672'];
+  const smallRefs = assignAgentRefs(small);
+  const bigRefs = assignAgentRefs(big);
+  const width = [...bigRefs.values()][0].length;
+  assert.ok(width > 8, 'a colliding roster must lengthen its refs');
+  for (const id of small) {
+    assert.ok(bigRefs.get(id).startsWith(smallRefs.get(id)), 'a longer ref must extend the shorter one');
+  }
+  const roster = big.map(id => ({ agent_id: id, name: id, device: 'remote' }));
+  const remoteSaidShort = smallRefs.get('alpha');
+  const resolved = resolveAgentAddress(`alpha [${remoteSaidShort}]`, roster);
+  assert.equal(resolved.ok, true, 'a shorter ref quoted by a peer must still resolve');
+  assert.equal(resolved.agent_id, 'alpha');
+});
+
+test('federation forwards a well-formed peer ref and drops a malformed one', async t => {
+  const { safeRosterAgent } = await load(t);
+  const base = { agent_id: 'a', name: 'peer', team: 'default', device: 'box' };
+  assert.equal(safeRosterAgent({ ...base, ref: 'ABCD1234' }).ref, 'abcd1234');
+  assert.equal(safeRosterAgent({ ...base, ref: 'not-a-ref' }).ref, undefined);
+  assert.equal(safeRosterAgent({ ...base, ref: '../../etc' }).ref, undefined);
+  assert.equal(safeRosterAgent(base).ref, undefined);
 });

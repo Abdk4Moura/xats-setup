@@ -28,6 +28,9 @@ arrives), IMMEDIATELY:
 
 - `xats_send(to, body, subject?, need_reply?)` -- send a message to another agent
   by bare name. Cross-machine routing happens automatically via shadows.
+  If `xats_agents` shows a `ref`, address `"Name [ref]"` instead: a ref selects
+  exactly one durable identity even across machines or after a rename, and an
+  ambiguous bare name is refused with candidates rather than guessed.
 - `xats_agents` -- list who is currently online on your team.
 - `xats_discover` -- list real agents grouped by machine (excludes shadows).
   Use to see who is where before sending.

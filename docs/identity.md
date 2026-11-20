@@ -49,6 +49,13 @@ nothing is guessed on the user's behalf.
 `ref` is derived from `agent_id` only, so it is stable across restarts and
 reconnects. It is lengthened when two refs in the same roster would collide.
 
+Refs are **prefix-stable**: a larger roster may print more hex characters, but the
+shorter form is always a prefix of the longer one. A caller can therefore quote a
+ref it received from another machine and still resolve it locally, because
+resolution compares at the precision supplied. Federation forwards a peer's own
+`ref` when it is well formed and drops it otherwise, so a remote ref never
+becomes local authority for an identity the local roster does not have.
+
 ## Session keys are internal
 
 A vendor session id (Claude `session_key`, an OpenCode badge key, a Pi session)
