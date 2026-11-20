@@ -13,9 +13,9 @@ import { installDaemon, daemonLayout } from '../lib/daemon.mjs';
 import { nativeProcessProof } from '../lib/process-proof.mjs';
 
 const repo = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-function files(t) {
+function files(t, stateFolder = '.state') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-port-safety-'));
-  const paths = { home, xatsRoot: path.join(home, '.xats'), daemonState: path.join(home, '.state') };
+  const paths = { home, xatsRoot: path.join(home, '.xats'), daemonState: path.join(home, stateFolder) };
   fs.mkdirSync(paths.xatsRoot); fs.mkdirSync(paths.daemonState);
   const { entry } = daemonLayout(paths);
   fs.mkdirSync(path.dirname(entry), { recursive: true });
@@ -35,10 +35,11 @@ const server=http.createServer((q,r)=>{r.setHeader('content-type','application/j
 server.listen(Number(arg('--port')),'127.0.0.1',()=>{fs.writeFileSync(arg('--pid-file'),JSON.stringify({pid:process.pid,port:server.address().port}));console.log('ready');});
 process.on('SIGTERM',()=>server.close(()=>process.exit(0)));
 `;
-async function ownProcess(t) {
-  const f = files(t);
+async function ownProcess(t, { implicitDb = false, emptyStateHome = false, stateFolder = '.state' } = {}) {
+  const f = files(t, stateFolder);
   fs.writeFileSync(f.entry, processSource);
-  const child = spawn(process.execPath, [f.entry, 'daemon', '--port', '0', '--db', path.join(f.paths.daemonState, 'data.db'), '--pid-file', path.join(f.paths.daemonState, 'daemon.pid')], { env: { ...process.env, HOME: f.paths.home, USERPROFILE: f.paths.home }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const dbArgs = implicitDb ? [] : ['--db', path.join(f.paths.daemonState, 'data.db')];
+  const child = spawn(process.execPath, [f.entry, 'daemon', '--port', '0', ...dbArgs, '--pid-file', path.join(f.paths.daemonState, 'daemon.pid')], { env: { ...process.env, HOME: f.paths.home, USERPROFILE: f.paths.home, ...(emptyStateHome ? { CROSS_AGENT_TEAMS_MCP_HOME: '' } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
   let errors = ''; child.stderr.on('data', b => { errors += b; });
   await Promise.race([once(child.stdout, 'data'), once(child, 'exit').then(() => { throw new Error(errors || 'fixture exited'); })]);
   const info = JSON.parse(fs.readFileSync(path.join(f.paths.daemonState, 'daemon.pid'), 'utf8'));
@@ -101,6 +102,11 @@ test('native process/socket ownership keeps a healthy nondefault port and unchan
   assert.equal(await pickPort(f.paths, [0]), f.port);
   const same = await ensureDaemon(f.paths, f.entry, f.port, false);
   assert.equal(same.pid, f.child.pid, 'unchanged rerun must not bounce the daemon');
+});
+
+test('an empty state-home override cannot authorize an inferred absolute database scope', { timeout: 60000 }, async t => {
+  const f = await ownProcess(t, { implicitDb: true, emptyStateHome: true, stateFolder: '.cross-agent-teams-mcp' });
+  assert.equal(ownedDaemon(f.paths, f.port), null);
 });
 
 test('a stale PID for a different process cannot authorize port reuse', async t => {

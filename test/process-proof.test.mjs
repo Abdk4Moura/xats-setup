@@ -28,6 +28,19 @@ test('Windows proof queries the precise listening socket without the NetTCPIP cm
   assert.deepEqual(result.argv, [exe, entry, 'daemon', '--db', String.raw`C:\Data files\data.db`]);
 });
 
+test('macOS scope never comes from flattened argv/environment text', () => {
+  const calls = [];
+  const result = nativeProcessProof(12345, 19000, 'darwin', (binary, args) => {
+    calls.push([binary, args]);
+    if (binary === '/usr/sbin/lsof') return 'p12345\n';
+    assert.ok(!args.includes('eww'), 'environment must not be inferred from ambiguous text');
+    return '/usr/local/bin/node /Users/fixture/cli.js daemon --port 19000';
+  });
+  assert.equal(result.env, undefined);
+  assert.equal(calls.length, 2);
+  assert.equal(result.argv[2], 'daemon');
+});
+
 test('Windows proof propagates a failed native probe instead of inventing ownership', () => {
   const failure = Object.assign(new Error('fixture cold-provider timeout'), { code: 'ETIMEDOUT' });
   assert.throws(() => nativeProcessProof(12345, 19000, 'win32', () => { throw failure; }), error => error === failure);
