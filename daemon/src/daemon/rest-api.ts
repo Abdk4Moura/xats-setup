@@ -118,7 +118,12 @@ async function handleSend(ctx: RestCtx, req: FastifyRequest, reply: FastifyReply
   }
   const result = await wrapStorage(() => ctx.sendSvc.send(input))
   if (isErrorResult(result)) {
-    return reply.code(sendErrorStatus(result.error)).send({ error: result.error })
+    // Address ambiguity must be actionable: callers need the exact candidates
+    // (each with its stable ref) rather than a bare failure.
+    const candidates = 'candidates' in result ? (result as { candidates?: unknown }).candidates : undefined
+    return reply.code(sendErrorStatus(result.error)).send(candidates === undefined
+      ? { error: result.error }
+      : { error: result.error, candidates })
   }
   return reply.send(result)
 }

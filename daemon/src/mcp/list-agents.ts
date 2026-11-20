@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import { AgentsRepo, REACHABLE_MS_DEFAULT } from '../storage/agents-repo.js'
 import { toPublicAgentRow, type PublicAgentListRow } from './agent-public-row.js'
+import { assignAgentRefs } from '../storage/agent-ref.js'
 
 // Shared team-scoped agent listing used by BOTH the list_agents MCP tool and the
 // GET /api/agents REST route. Kept as a single helper so the two stay in lockstep
@@ -11,14 +12,16 @@ export function listAgentsForTeam(
   ttlMs?: number,
 ): { agents: PublicAgentListRow[] } {
   const agents = new AgentsRepo(db)
+  const rows = agents.list({
+    team,
+    excludeRoles: ['__channel_proxy__'],
+    ttlMs: ttlMs ?? REACHABLE_MS_DEFAULT,
+  })
+  // Refs are assigned per team roster, so they stay stable and collision-free
+  // for every address the roster advertises.
+  const refs = assignAgentRefs(rows.map((row) => row.agent_id))
   return {
-    agents: agents
-      .list({
-        team,
-        excludeRoles: ['__channel_proxy__'],
-        ttlMs: ttlMs ?? REACHABLE_MS_DEFAULT,
-      })
-      .map(toPublicAgentRow),
+    agents: rows.map((row) => toPublicAgentRow(row, refs.get(row.agent_id) ?? '')),
   }
 }
 

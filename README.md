@@ -121,6 +121,7 @@ The longer version, including the security posture, is in
 | [docs/installation.md](docs/installation.md) | All flags, picker, upgrade, reset, Windows and WSL |
 | [docs/prove-it-works.md](docs/prove-it-works.md) | Two runnable proofs, with real output |
 | [docs/hosts.md](docs/hosts.md) | How each host draws mail and delivers it to the model |
+| [docs/identity.md](docs/identity.md) | Mailbox identity, presence, and unambiguous `Name [ref]` addressing |
 | [docs/limits.md](docs/limits.md) | What it does not do, and why |
 | [docs/stage1-networking.md](docs/stage1-networking.md) | Direct peer transport in depth |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model and reporting |

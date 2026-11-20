@@ -1,4 +1,5 @@
 import type { AgentListRow } from '../storage/agents-repo.js'
+import { formatAgentAddress } from '../storage/agent-ref.js'
 import type { DeliverySpec } from '../lib/delivery-spec.js'
 
 export type PublicDelivery =
@@ -9,6 +10,10 @@ export type PublicDelivery =
 
 export interface PublicAgentListRow {
   agent_id: string
+  /** Stable short reference derived from agent_id; survives restarts/renames. */
+  ref: string
+  /** `name [ref]` address accepted by send_message. */
+  address: string
   agent_type: AgentListRow['agent_type']
   agent_type_name: AgentListRow['agent_type_name']
   device: string
@@ -34,9 +39,11 @@ function projectDelivery(delivery: DeliverySpec): PublicDelivery {
   return { kind: delivery.kind }
 }
 
-export function toPublicAgentRow(row: AgentListRow): PublicAgentListRow {
+export function toPublicAgentRow(row: AgentListRow, ref: string): PublicAgentListRow {
   return {
     agent_id: row.agent_id,
+    ref,
+    address: formatAgentAddress(row.name, ref),
     agent_type: row.agent_type,
     agent_type_name: row.agent_type_name,
     device: row.device,
