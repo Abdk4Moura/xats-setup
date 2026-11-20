@@ -78,6 +78,9 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Use runner build disk for npm transport cache
+        shell: bash
+        run: printf 'npm_config_cache=%s/xats-packed-npm\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         id: node
         with:
@@ -89,6 +92,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             lib/harness.mjs
+            .github/workflows/ci.yml
       # Reuse only build prerequisites, never installed agent HOME or test
       # results. The packed bin still installs its runtime dependencies and
       # legacy SDK afresh, then performs every preservation/rerun assertion.
