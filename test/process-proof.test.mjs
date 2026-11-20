@@ -17,7 +17,7 @@ test('Windows proof queries the precise listening socket without the NetTCPIP cm
     called = true;
     assert.equal(binary, 'powershell.exe');
     assert.ok(args.includes('-NoProfile'));
-    assert.equal(options.timeout, 10000);
+    assert.equal(options.timeout, 20000);
     const script = args.at(-1);
     assert.match(script, /MSFT_NetTCPConnection/);
     assert.match(script, /LocalPort = 19000 AND OwningProcess = 12345 AND State = 2/);
@@ -26,6 +26,11 @@ test('Windows proof queries the precise listening socket without the NetTCPIP cm
   });
   assert.equal(called, true);
   assert.deepEqual(result.argv, [exe, entry, 'daemon', '--db', String.raw`C:\Data files\data.db`]);
+});
+
+test('Windows proof propagates a failed native probe instead of inventing ownership', () => {
+  const failure = Object.assign(new Error('fixture cold-provider timeout'), { code: 'ETIMEDOUT' });
+  assert.throws(() => nativeProcessProof(12345, 19000, 'win32', () => { throw failure; }), error => error === failure);
 });
 
 test('Windows proof refuses missing socket evidence and executable mismatches', () => {
