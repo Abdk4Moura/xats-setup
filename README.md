@@ -122,6 +122,7 @@ The longer version, including the security posture, is in
 | [docs/prove-it-works.md](docs/prove-it-works.md) | Two runnable proofs, with real output |
 | [docs/hosts.md](docs/hosts.md) | How each host draws mail and delivers it to the model |
 | [docs/identity.md](docs/identity.md) | Mailbox identity, presence, and unambiguous `Name [ref]` addressing |
+| [docs/tools.md](docs/tools.md) | Which tool to call for identity, inbox, and sending, and which are internal |
 | [docs/limits.md](docs/limits.md) | What it does not do, and why |
 | [docs/stage1-networking.md](docs/stage1-networking.md) | Direct peer transport in depth |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model and reporting |
