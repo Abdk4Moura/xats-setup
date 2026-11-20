@@ -114,12 +114,13 @@ jobs:
         run: node scripts/smoke-packed-install.mjs
 
   host-contracts:
-    name: pinned real host contracts (no models)
+    name: pinned host + native protocol (no inference)
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
+        id: node
         with:
           node-version: 22
       - name: Cache versioned public host tools
@@ -131,3 +132,17 @@ jobs:
         env:
           XATS_CI_HOST_TOOLS: ${{ runner.temp }}/xats-host-tools
         run: node scripts/validate-host-contracts.mjs
+      - uses: actions/cache@v4
+        id: deps
+        with:
+          path: node_modules
+          key: xats-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json', 'package.json') }}
+      - name: Install exact native-acceptance build dependencies on a cache miss
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund
+      - name: Build current daemon for owned native acceptance
+        run: npm run build:daemon
+      - name: Native protocol policy, real tool and durable mailbox acceptance
+        env:
+          XATS_CI_HOST_TOOLS: ${{ runner.temp }}/xats-host-tools
+        run: node experiments/claude-native/acceptance.mjs
