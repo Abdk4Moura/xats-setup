@@ -3,6 +3,10 @@
 import hashlib,json,os,selectors,shutil,signal,socket,sqlite3,stat,struct,subprocess,tempfile,threading,time,uuid
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
+import sys as _sys
+# Direct invocation (including `python3 -I`, which drops the script directory)
+# must still find the sibling modules.
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
 from acceptance_backend import Backend
 from bridge import Binding, Spool, route_local
 from linux_peer import process_start, socket_peer

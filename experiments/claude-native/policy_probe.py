@@ -2,6 +2,10 @@
 """Bounded owned-session native IPC probe. No real credentials or model calls."""
 import argparse, json, os, selectors, shutil, signal, socket, stat, struct, subprocess, tempfile, time, uuid
 from pathlib import Path
+import sys as _sys
+# Direct invocation (including `python3 -I`, which drops the script directory)
+# must still find the sibling modules.
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
 from linux_peer import process_start, socket_peer
 from wire import PeerIdentity, decode_receipt, encode_peer_message
 
