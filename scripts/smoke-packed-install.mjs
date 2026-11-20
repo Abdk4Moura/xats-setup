@@ -23,9 +23,18 @@ function execute(command, args, env = process.env, label = args[0]) {
     if (windows) assert.ok(args.every(arg => !/["\r\n%]/.test(arg)), 'unsafe cmd.exe argument');
     const child = spawn(command, windows ? args.map(arg => `"${arg}"`) : args, { cwd: repo, env, shell: windows, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
-    let stdout = '';
-    child.stdout.on('data', b => { output += b; stdout += b; });
-    child.stderr.on('data', b => { output += b; });
+    let stdout = '', pendingOut = '', pendingErr = '';
+    const progress = line => console.log(`[packed-smoke] ${label} +${((Date.now() - started) / 1000).toFixed(2)}s ${line.trim()}`);
+    child.stdout.on('data', b => {
+      output += b; stdout += b; pendingOut += b;
+      const lines = pendingOut.split('\n'); pendingOut = lines.pop();
+      for (const line of lines) if (/^(==>|\s+xats-setup v)/.test(line)) progress(line);
+    });
+    child.stderr.on('data', b => {
+      output += b; pendingErr += b;
+      const lines = pendingErr.split('\n'); pendingErr = lines.pop();
+      for (const line of lines) if (/^npm (http|timing (command:exec|reify|idealTree|npm)\b)/.test(line)) progress(line);
+    });
     const timer = setTimeout(() => { child.kill(); reject(new Error(`command timed out: ${command}`)); }, 180000);
     child.once('error', error => { clearTimeout(timer); reject(error); });
     child.once('exit', code => {
@@ -89,7 +98,7 @@ try {
   // Do not pass real host config overrides, provider tokens, or npm credentials
   // into the executable under test. Keep only executable/OS plumbing.
   const plumbing = Object.fromEntries(['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'ComSpec', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP', 'TMPDIR', 'LANG'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
-  const env = { ...plumbing, NODE_OPTIONS: '--max-old-space-size=256', HOME: home, USERPROFILE: home, CROSS_AGENT_TEAMS_MCP_HOME: path.join(home, '.cross-agent-teams-mcp'), XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share'), XDG_STATE_HOME: path.join(home, '.local/state'), XDG_CACHE_HOME: path.join(home, '.cache'), npm_config_cache: npmCache, npm_config_userconfig: path.join(home, '.npmrc'), npm_config_globalconfig: path.join(home, 'global.npmrc'), CI: '1', XATS_OPENCODE_V2: '1' };
+  const env = { ...plumbing, NODE_OPTIONS: '--max-old-space-size=256', HOME: home, USERPROFILE: home, CROSS_AGENT_TEAMS_MCP_HOME: path.join(home, '.cross-agent-teams-mcp'), XDG_CONFIG_HOME: path.join(home, '.config'), XDG_DATA_HOME: path.join(home, '.local/share'), XDG_STATE_HOME: path.join(home, '.local/state'), XDG_CACHE_HOME: path.join(home, '.cache'), npm_config_cache: npmCache, npm_config_loglevel: 'http', npm_config_timing: 'true', npm_config_userconfig: path.join(home, '.npmrc'), npm_config_globalconfig: path.join(home, 'global.npmrc'), CI: '1', XATS_OPENCODE_V2: '1' };
   delete env.XATS_BASE;
   delete env.XATS_BASE_URL;
   delete env.XATS_PORT;
