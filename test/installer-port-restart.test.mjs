@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { pickPort, ownedDaemon, portFile, writePort, readPort, paths as getPaths } from '../lib/platform.mjs';
 import { ensureDaemon, preserveDefinition } from '../lib/service.mjs';
 import { installDaemon, daemonLayout } from '../lib/daemon.mjs';
+import { nativeProcessProof } from '../lib/process-proof.mjs';
 
 const repo = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 function files(t) {
@@ -90,7 +91,13 @@ test('malformed saved port fails closed and leaves the file unchanged', async t 
 
 test('native process/socket ownership keeps a healthy nondefault port and unchanged daemon PID', { timeout: 60000 }, async t => {
   const f = await ownProcess(t);
-  assert.equal(ownedDaemon(f.paths, f.port)?.pid, f.child.pid, 'native OS probe must establish the actual child identity');
+  const own = ownedDaemon(f.paths, f.port);
+  if (!own && process.platform === 'win32') {
+    // Fixture-only diagnostics: never print real user-process command lines.
+    try { t.diagnostic(JSON.stringify({ fixtureNativeProof: nativeProcessProof(f.child.pid, f.port) })); }
+    catch (error) { t.diagnostic(JSON.stringify({ probeError: error.code || error.name, signal: error.signal, status: error.status })); }
+  }
+  assert.equal(own?.pid, f.child.pid, 'native OS probe must establish the actual child identity');
   assert.equal(await pickPort(f.paths, [0]), f.port);
   const same = await ensureDaemon(f.paths, f.entry, f.port, false);
   assert.equal(same.pid, f.child.pid, 'unchanged rerun must not bounce the daemon');

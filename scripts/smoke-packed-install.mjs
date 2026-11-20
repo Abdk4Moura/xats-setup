@@ -64,10 +64,11 @@ try {
   for (const name of required) assert.ok(packed[0].files.some(file => file.path === name), `npm package missing ${name}`);
   assert.ok(!packed[0].files.some(file => /(?:^|\/)node_modules\//.test(file.path)), 'npm package must not ship developer dependencies');
 
+  const daemonPort = await freePort();
   seed('.claude/settings.json', JSON.stringify({ env: { CUSTOM_SENTINEL: 'keep' }, hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo user-hook' }] }] } }));
   seed('.claude.json', JSON.stringify({ customSentinel: 'keep', mcpServers: { unrelated: { command: 'user-server' }, 'cross-agent-teams': { type: 'http', url: 'http://127.0.0.1:1/mcp', headers: { 'X-Custom': 'keep' } } } }));
   seed('.codex/hooks.json', JSON.stringify({ customSentinel: 'keep', hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo codex-user-hook' }] }] } }));
-  seed('.codex/config.toml', '# user comment\nmodel = "user-model"\n');
+  seed('.codex/config.toml', `# user comment\nmodel = "user-model"\n\n[mcp_servers.cross-agent-teams]\nurl = "http://127.0.0.1:${daemonPort}/mcp"\nhttp_headers = { "X-Custom" = "keep" }\n`);
   seed('.config/opencode/opencode.jsonc', '// user comment\n{"customSentinel":"keep","plugins":["user-plugin"]}\n');
   seed('.config/mimocode/mimocode.json', JSON.stringify({ customSentinel: 'keep', plugin: ['user-plugin'] }));
   seed('.pi/agent/extensions/user-extension.ts', '// user-owned extension\n');
@@ -77,7 +78,7 @@ try {
   seed('.xats/peer/tls-identity.json', 'user-owned-tls-identity\n');
   seed('.cross-agent-teams-mcp/data.db', 'user-owned-mailbox-sentinel\n');
   seed('.xats/xats-bind-hook.mjs', '// obsolete hook remains during dry-run\n');
-  seed('.xats/port', `${await freePort()}\n`);
+  seed('.xats/port', `${daemonPort}\n`);
   const originals = snapshot(home);
   const untouched = ['.codex/config.toml', '.pi/agent/extensions/user-extension.ts', '.omp/agent/extensions/user-extension.ts', '.xats/bridge/peers.json', '.xats/peer/identity.json', '.xats/peer/tls-identity.json', '.cross-agent-teams-mcp/data.db', '.xats/port'];
   // Do not pass real host config overrides, provider tokens, or npm credentials
@@ -88,7 +89,7 @@ try {
   delete env.XATS_BASE_URL;
   delete env.XATS_PORT;
   delete env.XATS_LABEL;
-  const args = ['exec', '--yes', '--offline', `--package=${tarball}`, '--', 'xats-setup', `--only=${components}`, '--yes', '--no-ephemeral', '--label', 'packed-smoke'];
+  const args = ['exec', '--yes', '--prefer-offline', `--package=${tarball}`, '--', 'xats-setup', `--only=${components}`, '--yes', '--no-ephemeral', '--label', 'packed-smoke'];
 
   await execute(npm, [...args, '--dry-run'], env);
   assert.deepEqual(snapshot(home), originals, 'dry-run must not change preconfigured home, including file modes');

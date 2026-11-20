@@ -31,6 +31,6 @@ if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 8) {
   process.exit(1);
 }
 console.log('# xats-test-files: ' + JSON.stringify(files.map(file => path.basename(file))));
-const result = spawnSync(process.execPath, ['--test', `--test-concurrency=${concurrency}`, ...files], { stdio: 'inherit' });
+const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', `--test-concurrency=${concurrency}`, ...files], { stdio: 'inherit' });
 // Propagate the runner's exit status; default to failure if it did not report one.
 process.exit(result.status ?? 1);

@@ -83,7 +83,7 @@ jobs:
           node-version: 22
           cache: npm
       # Deliberately clean on every CI: this independently verifies installation
-      # scripts and seeds the offline npm cache used by the actual packed bin.
+      # scripts and seeds the dependency cache used by the actual packed bin.
       - run: npm ci --no-audit --no-fund
       - run: npm run build:daemon
       - name: Actual npm-bin install, dry-run, preservation and second install

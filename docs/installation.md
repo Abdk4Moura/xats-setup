@@ -152,12 +152,15 @@ notifications in every real host version; those remain release acceptance tests.
 
 ## Install from a tarball
 
-For a machine without npm registry access:
+To test or transfer the exact package artifact:
 
 ```sh
 npm pack                # produces xats-setup-<version>.tgz
 npx ./xats-setup-*.tgz
 ```
+
+Runtime dependencies still require registry access or a sufficiently primed npm
+cache. A package tarball alone is not a fully offline dependency bundle.
 
 ## Windows and WSL
 
