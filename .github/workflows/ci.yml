@@ -82,6 +82,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          # Keep this cache distinct from root-only dependency caches. It must
+          # also retain registry metadata/tarballs fetched by the real legacy
+          # adapter install, without reusing an installed HOME or test result.
+          cache-dependency-path: |
+            package-lock.json
+            lib/harness.mjs
       # Deliberately clean on every CI: this independently verifies installation
       # scripts and seeds the dependency cache used by the actual packed bin.
       - run: npm ci --no-audit --no-fund

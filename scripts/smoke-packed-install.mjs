@@ -14,14 +14,14 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-packed-smoke-'));
 const home = path.join(scratch, 'home');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const components = 'claude,codex,pi,omp,opencode,mimocode,agy,bridge';
-function execute(command, args, env = process.env, label = args[0]) {
+function execute(command, args, env = process.env, label = args[0], cwd = repo) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     // npm.cmd requires cmd.exe. Quote every argument, including the tarball
     // path, because Windows runner temp directories can contain spaces.
     const windows = process.platform === 'win32';
     if (windows) assert.ok(args.every(arg => !/["\r\n%]/.test(arg)), 'unsafe cmd.exe argument');
-    const child = spawn(command, windows ? args.map(arg => `"${arg}"`) : args, { cwd: repo, env, shell: windows, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, windows ? args.map(arg => `"${arg}"`) : args, { cwd, env, shell: windows, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     let stdout = '', pendingOut = '', pendingErr = '';
     const progress = line => console.log(`[packed-smoke] ${label} +${((Date.now() - started) / 1000).toFixed(2)}s ${line.trim()}`);
@@ -85,6 +85,7 @@ try {
   seed('.codex/config.toml', `# user comment\nmodel = "user-model"\n\n[mcp_servers.cross-agent-teams]\nurl = "http://127.0.0.1:${daemonPort}/mcp"\nhttp_headers = { "X-Custom" = "keep" }\n`);
   seed('.config/opencode/opencode.jsonc', '// user comment\n{"customSentinel":"keep","plugins":["user-plugin"]}\n');
   seed('.config/mimocode/mimocode.json', JSON.stringify({ customSentinel: 'keep', plugin: ['user-plugin'] }));
+  seed('.config/mimocode/verify-plugin.mjs', 'import assert from "node:assert/strict"; import { tool } from "@opencode-ai/plugin"; assert.equal(typeof tool, "function");\n');
   seed('.pi/agent/extensions/user-extension.ts', '// user-owned extension\n');
   seed('.omp/agent/extensions/user-extension.ts', '// user-owned extension\n');
   seed('.xats/bridge/peers.json', '{"peers":[{"name":"user-peer","bridge_host":"example.invalid","bridge_port":9101}]}\n');
@@ -105,9 +106,12 @@ try {
   delete env.XATS_LABEL;
   const args = ['exec', '--yes', '--prefer-offline', `--package=${tarball}`, '--', 'xats-setup', `--only=${components}`, '--yes', '--no-ephemeral', '--label', 'packed-smoke'];
 
-  await execute(npm, [...args, '--dry-run'], env, 'initial dry-run');
+  // Execute from the isolated HOME, never from the source checkout: npm must
+  // resolve the shipped bin rather than any local project installation.
+  await execute(npm, [...args, '--dry-run'], env, 'initial dry-run', home);
   assert.deepEqual(snapshot(home), originals, 'dry-run must not change preconfigured home, including file modes');
-  await execute(npm, args, env, 'first install');
+  await execute(npm, args, env, 'first install', home);
+  await execute(process.execPath, [path.join(home, '.config/mimocode/verify-plugin.mjs')], env, 'legacy SDK import', home);
   for (const name of ['.pi/agent/extensions/xats.ts', '.omp/agent/extensions/xats.ts', '.config/opencode/plugins/xats-register.ts', '.gemini/config/plugins/xats/plugin.json', '.gemini/config/plugins/xats/skills/xats/SKILL.md']) assert.ok(fs.existsSync(path.join(home, name)), `installed bin missing ${name}`);
   assert.equal(json('.claude/settings.json').env.CUSTOM_SENTINEL, 'keep');
   assert.ok(json('.claude/settings.json').hooks.SessionStart.some(group => group.hooks.some(hook => hook.command === 'echo user-hook')));
@@ -127,14 +131,14 @@ try {
   const commentBackup = fs.readdirSync(path.join(home, '.config/opencode')).filter(name => name.startsWith('opencode.jsonc.') && name !== 'opencode.jsonc');
   assert.ok(commentBackup.some(name => fs.readFileSync(path.join(home, '.config/opencode', name), 'utf8').includes('// user comment')), 'original JSONC comments must have a recoverable backup');
 
-  await execute(npm, args, env, 'repeat install');
+  await execute(npm, args, env, 'repeat install', home);
   const second = snapshot(home);
   // The install manifest intentionally records each completed run's timestamp.
   delete first[path.normalize('.xats/manifest.json')];
   delete second[path.normalize('.xats/manifest.json')];
   assert.deepEqual(second, first, 'identical rerun must preserve contents and avoid accumulating backups');
   const beforeDry = snapshot(home);
-  await execute(npm, [...args, '--dry-run'], env, 'upgrade dry-run');
+  await execute(npm, [...args, '--dry-run'], env, 'upgrade dry-run', home);
   assert.deepEqual(snapshot(home), beforeDry, 'upgrade dry-run changed existing files');
   console.log(`Packed npm-bin install, rerun, dry-run, and preservation passed (${process.platform}/${process.arch}).`);
 } finally {
