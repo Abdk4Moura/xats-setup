@@ -245,20 +245,6 @@ function migrateMessagesNeedReplyColumn(db: Database.Database): void {
   db.exec(`ALTER TABLE messages ADD COLUMN need_reply INTEGER NOT NULL DEFAULT 1`)
 }
 
-// Sentinel one-shot migration: agents whose cursor is still at the schema
-// default of 0 are advanced to current MAX(event_id), so post-deploy boots
-// stop replaying the entire historical mailbox. The `last_processed_event_id = 0`
-// predicate is itself the sentinel — once register_agent (D4) initialises new
-// rows above 0 and get_inbox auto-advance pushes live agents forward, this
-// UPDATE matches no rows on subsequent boots.
-function migrateAgentsCursorWatermark(db: Database.Database): void {
-  db.exec(
-    `UPDATE agents
-        SET last_processed_event_id = COALESCE((SELECT MAX(event_id) FROM events), 0)
-      WHERE last_processed_event_id = 0`
-  )
-}
-
 function dropLegacyTaskContractTables(db: Database.Database): void {
   db.exec(`DROP TABLE IF EXISTS tasks`)
   db.exec(`DROP TABLE IF EXISTS contracts`)
@@ -274,7 +260,8 @@ export function applySchema(
   migrateAgentsDeliveryColumns(db)
   migrateAgentsDeviceColumns(db, opts.localDevice ?? 'local')
   migrateMessagesNeedReplyColumn(db)
-  migrateAgentsCursorWatermark(db)
+  // Zero is a valid unread cursor, not an uninitialized migration sentinel.
+  // Schema initialization must never consume mail; actual inbox reads do that.
   migrateClaudeBindCodeColumns(db)
 }
 

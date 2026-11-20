@@ -25,6 +25,14 @@ describe('stripJsonc', () => {
     const raw = `{"s": "/* not a comment */"}`;
     assert.equal(JSON.parse(stripJsonc(raw)).s, '/* not a comment */');
   });
+  it('preserves comma-bracket text and escaped quotes inside user values', () => {
+    const value = 'keep , ] and , } plus a "quoted" value';
+    const raw = '// comment\n' + JSON.stringify({ value, array: ['literal , ]'] });
+    assert.deepEqual(JSON.parse(stripJsonc(raw)), { value, array: ['literal , ]'] });
+  });
+  it('rejects unterminated comments instead of accepting a truncated config', () => {
+    assert.throws(() => stripJsonc('{"value":1} /* unterminated'), /Unterminated/);
+  });
   it('handles mixed comments and trailing comma', () => {
     const raw = `{
       // plugin list

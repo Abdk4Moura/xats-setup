@@ -23,6 +23,14 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit' });
+// Default to one worker on developer machines. CI explicitly requests bounded
+// per-file parallelism; each file still gets its own isolated Node process.
+const concurrency = Number(process.env.XATS_TEST_CONCURRENCY ?? '1');
+if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 8) {
+  console.error('XATS_TEST_CONCURRENCY must be an integer from 1 to 8');
+  process.exit(1);
+}
+console.log('# xats-test-files: ' + JSON.stringify(files.map(file => path.basename(file))));
+const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', `--test-concurrency=${concurrency}`, ...files], { stdio: 'inherit' });
 // Propagate the runner's exit status; default to failure if it did not report one.
 process.exit(result.status ?? 1);

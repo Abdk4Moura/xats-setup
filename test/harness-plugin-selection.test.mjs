@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ensurePluginConfig, isOpenCodeV2Version } from '../lib/harness.mjs';
+import { ensurePluginConfig, isOpenCodeV2Version, installOpencode } from '../lib/harness.mjs';
 
 test('detects OpenCode v2 version output', () => {
   assert.equal(isOpenCodeV2Version('opencode v2.0.27'), true);
@@ -47,6 +47,20 @@ test('preserves the legacy plugin key for OpenCode v1 and Mimocode', (t) => {
   const config = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.deepEqual(config.plugins, ['other-plugin']);
   assert.deepEqual(config.plugin, ['./plugins/xats-register.ts']);
+});
+
+test('forced v2 actually installs the native adapter and config key without a host binary', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-forced-v2-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  // Guard against a regression accidentally invoking npm for the legacy path.
+  fs.mkdirSync(path.join(root, 'node_modules/@opencode-ai/plugin'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'opencode.json'), '{"plugins":["user-plugin"]}');
+  const before = process.env.XATS_OPENCODE_V2;
+  t.after(() => { if (before === undefined) delete process.env.XATS_OPENCODE_V2; else process.env.XATS_OPENCODE_V2 = before; });
+  process.env.XATS_OPENCODE_V2 = '1';
+  installOpencode({ opencodePlugins: path.join(root, 'plugins') });
+  assert.match(fs.readFileSync(path.join(root, 'plugins/xats-register.ts'), 'utf8'), /@opencode\/plugin/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'opencode.json'), 'utf8')).plugins, ['user-plugin', './plugins/xats-register.ts']);
 });
 
 // Reported by a user: `ssh host 'npx xats-setup'` runs in a non-login shell whose
