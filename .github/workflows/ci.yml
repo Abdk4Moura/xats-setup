@@ -37,7 +37,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       # Exact keys only: native addons must never cross OS/architecture/Node or
-      # dependency-lock boundaries. Packed-install jobs still run clean npm ci.
+      # dependency-lock boundaries. Actual packed installs always use fresh HOME.
       - uses: actions/cache@v4
         id: deps
         with:
@@ -79,6 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
+        id: node
         with:
           node-version: 22
           cache: npm
@@ -88,9 +89,22 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             lib/harness.mjs
-      # Deliberately clean on every CI: this independently verifies installation
-      # scripts and seeds the dependency cache used by the actual packed bin.
-      - run: npm ci --no-audit --no-fund
+      # Reuse only build prerequisites, never installed agent HOME or test
+      # results. The packed bin still installs its runtime dependencies and
+      # legacy SDK afresh, then performs every preservation/rerun assertion.
+      - uses: actions/cache@v4
+        id: deps
+        with:
+          path: node_modules
+          key: xats-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json', 'package.json') }}
+      - name: Install exact build dependencies on a cache miss
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund
+      - name: Check build dependency tree and native SQLite ABI
+        shell: bash
+        run: |
+          npm ls --depth=0
+          node -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); db.exec('create table qc(x)'); db.close();"
       - run: npm run build:daemon
       - name: Actual npm-bin install, dry-run, preservation and second install
         run: node scripts/smoke-packed-install.mjs
