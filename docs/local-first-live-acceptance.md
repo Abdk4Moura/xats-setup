@@ -239,3 +239,25 @@ about a second and my process-pause attempts did not reliably stop it. rigL caug
 the `stored` moment with an expired lease; rigM/rigO caught claimed → generation →
 consumed. The two halves are each observed live, and `local-delivery-restart.test.mjs`
 covers the combined case deterministically against a real daemon process.
+
+## Pane text (the model side)
+
+The rigs captured the Claude pane to `pane.log`. After stripping terminal escapes,
+the delivery lines read:
+
+```text
+✦ xats · 1 notice pending · 1 needs reply
+›Prompt from the xats plugin
+```
+
+That is the plugin submitting the notice as a plugin-attributed prompt, not text in
+the person's composer, and the band showing the outstanding notice. In the restart
+rigs the same band reappears after recovery without any `/mcp` prompt:
+
+```text
+✦ xats · claude-vps3584156-rigM-b7d45ab4
+```
+
+Where the model could not submit (the host rejects `prompt.submit` after a restart on
+this build), the pane shows the model reading the inbox itself, and the row is
+reconciled to `inbox-consumed` only after that read.
