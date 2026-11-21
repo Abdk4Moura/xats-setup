@@ -18,8 +18,13 @@ directory, and tmux session. Claude ran with `--setting-sources ''` plus explici
 `assets/claude/mod`, `--strict-mcp-config` with a single MCP entry for the rig
 daemon, and `XATS_BASE` pinned so the hook could not fall back to `~/.xats/port`.
 
-Evidence kept in this directory: `daemon.log`, `data.db` (rig 1),
-`daemon-local-first.log`, `data-local-first.db` (rig 2), `cursor.json`.
+Raw rig artifacts are not committed. They stay under
+`/root/.cache/xats-tasks/rigL`, `rigO`, `rigN` and the earlier rig directories on
+the machine that ran them: `daemon.log`, `state/data.db`, `pane.log` and
+`result.json` per rig. The numbers quoted below are read from those files, and the
+reproducible proof of criterion 3 is the committed test
+`test/local-delivery-restart.test.mjs`, which starts a real daemon, kills it, and
+restarts it against the same database.
 
 ## Verified working
 
