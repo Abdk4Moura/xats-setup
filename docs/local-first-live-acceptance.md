@@ -207,3 +207,12 @@ real inbox read in a user turn; the attempt journal records that submit as `unkn
 and is reconciled to `inbox-consumed` only after the read. And no live host refusal
 was induced in this rig, because the local-first path cannot force one; the
 invariant is proven by the focused test rather than by a live refusal.
+
+### Final run on the shipped head (rigJ, `85f42e1`)
+
+| Criterion | Measured |
+|---|---|
+| 1 | refused-then-consumed attempts: **0**; a new test proves a refusal survives an advanced cursor plus a replacement generation (the auditor's exact reproduction) |
+| 2 | `auto_poke:false`: one outbox row, `inbox-consumed`, generation 1; polling returns early while the local owner is active |
+| 3 | cursor 1 before the restart, event 3 after; pending row `inbox-consumed` with generation 1; one `mcp lazy rebind`; single identity; `binding_lost` 0; no `/mcp` |
+| 4 | aged recipient: message stored, status `skipped` / `queued_unreachable` |
