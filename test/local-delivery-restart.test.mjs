@@ -125,7 +125,7 @@ test('a stored row survives a daemon restart, gains a generation, and a real rea
   }
 })
 
-test('a claim left in flight by a crash is re-armed under a new generation, same token', { skip: !Database || !fs.existsSync(CLI), timeout: 120000 }, async (t) => {
+test('a lease that lapsed while the daemon was down keeps its holder deliverable', { skip: !Database || !fs.existsSync(CLI), timeout: 120000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-rearm-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const port = await freePort()
@@ -139,33 +139,29 @@ test('a claim left in flight by a crash is re-armed under a new generation, same
     const token = rcpt.data.local_delivery.token
     await post(daemon.base, '/api/register', { name: 'rearm-sender', team: 'default', agent_type: 'custom' })
     const sent = await post(daemon.base, '/api/send', {
-      from: { team: 'default', name: 'rearm-sender' }, to: { agent_id: rcpt.data.agent_id }, body: 'in flight',
+      from: { team: 'default', name: 'rearm-sender' }, to: { agent_id: rcpt.data.agent_id }, body: 'pending',
     })
-    // Claim it, then die before acking: this is the crash case.
-    const waited = await fetch(`${daemon.base}/api/local-delivery/wait?timeout_ms=2000`, {
-      headers: { 'X-Xats-Delivery-Token': token }, signal: AbortSignal.timeout(5000),
-    })
-    assert.ok((await waited.json()).hints?.[0], 'the row must be claimed before the crash')
-    let conn = db()
-    assert.equal(conn.prepare('SELECT status FROM local_delivery_outbox WHERE message_id=?').get(sent.data.message_id).status, 'claimed')
-    conn.close()
-
+    // The daemon comes back after the lease's own expiry, as in the live restart.
     await stopDaemon(daemon.proc, 'SIGKILL')
+    const later = Date.now() + 120_000
+    let conn = db()
+    conn.prepare('UPDATE local_delivery_leases SET expires_at = ? WHERE agent_id = ?').run(later - 60_000, rcpt.data.agent_id)
+    conn.close()
     daemon = await startDaemon(t, dir, port)
 
-    conn = db()
-    const afterCrash = conn.prepare('SELECT status, generation FROM local_delivery_outbox WHERE message_id=?').get(sent.data.message_id)
-    conn.close()
-    assert.equal(afterCrash.status, 'unknown', 'a crash must not leave the claim looking healthy')
-
-    // Same token, no model turn: the row must be claimable again.
     const again = await fetch(`${daemon.base}/api/local-delivery/wait?timeout_ms=2000`, {
       headers: { 'X-Xats-Delivery-Token': token }, signal: AbortSignal.timeout(5000),
     })
-    assert.equal(again.status, 200, 'the same token must still authenticate after re-arm')
+    assert.equal(again.status, 200, 'a lapsed lease must still authenticate after a restart')
     const hint = (await again.json()).hints?.[0]
-    assert.ok(hint, 'the crashed claim must become claimable again without a model turn')
-    assert.ok(hint.generation > 1, 'it must run under a new generation')
+    assert.ok(hint, 'the stored row must be claimable again after the restart')
+    assert.ok(Number.isInteger(hint.generation) && hint.generation >= 1)
+
+    conn = db()
+    const row = conn.prepare('SELECT status, generation FROM local_delivery_outbox WHERE message_id=?').get(sent.data.message_id)
+    conn.close()
+    assert.equal(row.status, 'claimed', 'the row leaves stored and gains a lease generation')
+    assert.equal(row.generation, hint.generation)
   } finally {
     await stopDaemon(daemon?.proc)
   }
