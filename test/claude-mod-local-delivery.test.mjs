@@ -484,3 +484,27 @@ test('session hook schedules background work without waiting for the longpoll', 
   assert.equal(f.requests.length, 0)
   assert.ok(f.timers.length > 0)
 })
+
+// --- submit-outcome classification (task: busy vs explicit refusal) ---------
+const classify = mod.classifySubmitResult
+
+test('busy host result is a retryable hold, never a refusal', () => {
+  assert.equal(classify({ ok: false, error: 'busy: a turn is already running' }), 'held')
+  assert.equal(classify({ ok: false, status: 'held' }), 'held')
+  assert.equal(classify({ ok: false, reason: 'turn in progress' }), 'held')
+})
+
+test('explicit refusal stays terminal', () => {
+  assert.equal(classify({ ok: false, stage: 'refused' }), 'refused')
+  assert.equal(classify({ ok: false, refused: true }), 'refused')
+})
+
+test('unclassifiable failure is unknown, not an invented refusal', () => {
+  assert.equal(classify({ ok: false }), 'unknown')
+  assert.equal(classify({ ok: false, error: 'socket closed' }), 'unknown')
+})
+
+test('success shapes keep their distinct stages', () => {
+  assert.equal(classify({ ok: true }), 'host-queued')
+  assert.equal(classify(undefined), 'transport-written')
+})

@@ -130,6 +130,17 @@ export class LocalDeliveryStore {
     return row as LocalDeliveryLease | undefined ?? null
   }
 
+  /**
+   * Ownership probe for the send path. A recipient has a local delivery owner
+   * only while a live, unexpired lease is bound to its current session and the
+   * agent is online. Otherwise the polling/host path owns delivery.
+   */
+  hasLiveLease(agentId: string, now = Date.now()): boolean {
+    time(now)
+    if (typeof agentId !== 'string' || agentId.length === 0) return false
+    return this.current(agentId, now) !== null
+  }
+
   issueLease(args: { agentId: string; sessionKey: string; ttlMs?: number; now?: number }): LocalDeliveryLease & { token: string } {
     const now = time(args.now)
     const duration = ttl(args.ttlMs)

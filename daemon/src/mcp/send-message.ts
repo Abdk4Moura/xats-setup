@@ -32,6 +32,9 @@ interface SuccessResult {
   poke_skip_reasons?: Array<{ agent_id: string; reason: AutoPokeSkipReason }>
   retry_scheduled: boolean
   retry_delays_s?: number[]
+  /** Stored for a recipient past the reachability window; no wake attempted. */
+  queued_unreachable?: boolean
+  unreachable_seconds?: number
 }
 
 export type SendResult =
@@ -135,14 +138,15 @@ export class SendMessageService {
       .get(resolvedId) as RecipientLookupRow & { last_seen_at: string } | undefined
     if (!rcpt || rcpt.team !== toTeam) return { error: 'unknown_recipient' }
 
-    // Reachability gate: refuse if recipient is not online (TTL-based)
+    // Reachability does not decide whether mail exists: the mailbox is durable.
+    // It only decides whether a wake can be attempted now. A recipient past the
+    // window still receives the stored message, marked queued_unreachable, so a
+    // reply is never lost just because the other side went quiet.
     const ttlMs = REACHABLE_MS_DEFAULT
     const lastSeenMs = new Date(rcpt.last_seen_at).getTime()
     const ageMs = Date.now() - lastSeenMs
-    if (!Number.isFinite(lastSeenMs) || ageMs > ttlMs) {
-      const ageSec = Math.floor(ageMs / 1000)
-      return { error: 'unreachable', detail: `recipient not online (last seen ${ageSec}s ago)` } as SendResult
-    }
+    const reachable = Number.isFinite(lastSeenMs) && ageMs <= ttlMs
+    const unreachableSeconds = reachable ? 0 : Math.max(0, Math.floor(ageMs / 1000))
 
     const recipientRow: RecipientPokeRow = {
       agent_id: rcpt.agent_id,
@@ -162,6 +166,17 @@ export class SendMessageService {
         const wakePath = `${delivery.job_dir}/.xats-wake`
         await fs.writeFile(wakePath, new Date().toISOString())
       } catch { /* best-effort: job_dir may not exist yet */ }
+    }
+
+    if (!reachable) {
+      // No wake attempt: record why, but keep the stored message authoritative.
+      recordInitialDeliveryStatuses(this.db, {
+        messageId: baseResult.message_id,
+        recipients: [rcpt.agent_id],
+        delivered: new Set(),
+        skipped: [{ agent_id: rcpt.agent_id, reason: 'queued_unreachable' }],
+      })
+      return { ...baseResult, poked: false, retry_scheduled: false, queued_unreachable: true, unreachable_seconds: unreachableSeconds }
     }
 
     const autoPokeEnabled = input.auto_poke !== false
@@ -216,7 +231,13 @@ export class SendMessageService {
       ).run(id, event_id, args.fromTeam, args.toTeam, args.from,
         args.toAgentId,
         null, args.input.subject ?? null, args.input.body, needReply, sent_at)
-      if (args.input.auto_poke !== false && args.from !== args.toAgentId) {
+      // Exactly one delivery owner per message. A live local lease means this
+      // host owns delivery for that generation, so the row is enqueued whether
+      // or not auto-poke (tmux wake) is enabled. Without a lease the polling /
+      // host path owns it and no outbox row is created, so the two can never
+      // deliver the same message twice.
+      if (args.from !== args.toAgentId &&
+          new LocalDeliveryStore(this.db).hasLiveLease(args.toAgentId)) {
         new LocalDeliveryStore(this.db).enqueue({ messageId: id, agentId: args.toAgentId, eventId: event_id })
       }
       return { message_id: id, event_id, sent_at }

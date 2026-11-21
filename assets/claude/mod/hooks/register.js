@@ -72,6 +72,11 @@ let localLease = null;
 let localBusy = false;
 let localConnected = false;
 let localCanFallback = true;
+// Bounded re-arm/retry accounting: after a daemon restart the owner keeps
+// trying instead of falling back to polling or waiting for a manual /mcp.
+let localReconnects = 0;
+let busyRetries = 0;
+const MAX_BUSY_RETRIES = 6;
 let localError = "";
 let localAttempt = null;
 // Retain every unresolved host outcome, not just the most recent receipt.
@@ -471,6 +476,26 @@ async function localRequest($, route, body, lease = localLease) {
   throw new Error("invalid local delivery response");
 }
 
+/**
+ * Host submit outcomes, classified by evidence rather than convenience.
+ *
+ * A non-ok result is NOT automatically a refusal: the common cause is a turn
+ * already running, which is a hold-and-retry, not a policy decision. Only an
+ * explicit refusal signal is terminal.
+ */
+function classifySubmitResult(result) {
+  if (result === undefined) return "transport-written";
+  if (result?.ok === true) return "host-queued";
+  const stage = String(result?.stage ?? result?.status ?? "").toLowerCase();
+  if (stage === "held") return "held";
+  if (stage === "refused" || result?.refused === true) return "refused";
+  const reason = String(result?.error ?? result?.reason ?? result?.code ?? "");
+  // Busy signals are retryable: the host is mid-turn, so wait for the boundary.
+  if (/busy|in.?progress|mid.?turn|turn|queued|running|not.?idle|interrupt/i.test(reason)) return "held";
+  // Unclassifiable: record uncertainty instead of inventing a refusal.
+  return "unknown";
+}
+
 function validGeneration(value) {
   return (Number.isSafeInteger(value) && value > 0) ||
     (typeof value === "string" && value.length > 0 && value.length <= 256);
@@ -566,9 +591,9 @@ async function renewLocal($) {
   }
 }
 
-async function saveLocalAttempt($, hint, stage, accepted = false) {
+async function saveLocalAttempt($, hint, stage, accepted = false, { blocking = true } = {}) {
   localAttempt = { attempt_id: hint.attempt_id, generation: hint.generation, event_id: hint.event_id, stage };
-  if (["held", "refused", "unknown"].includes(stage)) localOutcomes[hint.event_id] = localAttempt;
+  if (blocking && ["held", "refused", "unknown"].includes(stage)) localOutcomes[hint.event_id] = localAttempt;
   else delete localOutcomes[hint.event_id];
   if (accepted) {
     acceptedEventId = Math.max(acceptedEventId, hint.event_id);
@@ -629,11 +654,23 @@ async function processLocalHint($, hint) {
   submitAttempts += 1;
   let stage;
   try {
-    const result = await $.prompt.submit({ text: payloadText(batch) });
-    stage = result?.ok === true ? "host-queued" : result === undefined ? "transport-written" :
-      result?.stage === "held" || result?.status === "held" ? "held" : "refused";
-  } catch {
+    stage = classifySubmitResult(await $.prompt.submit({ text: payloadText(batch) }));
+  } catch (error) {
+    // A thrown submit is uncertainty, never a refusal.
     stage = "unknown";
+    lastSubmitError = String(error?.message || error || "prompt submit failed");
+  }
+  if (stage === "held") {
+    // Busy host: keep the claim, do not acknowledge, and retry at the next turn
+    // boundary. Journaled for visibility but explicitly non-blocking so the
+    // retry is not skipped as an already-settled outcome.
+    await saveLocalAttempt($, hint, "held", false, { blocking: false });
+    pending = [];
+    lastSubmitError = "host busy; retrying at the next turn boundary";
+    const busy = new Error("host_busy");
+    busy.retryable = true;
+    busy.hint = hint;
+    throw busy;
   }
   pending = [];
   if (stage === "host-queued" || stage === "transport-written") submitOk += 1;
@@ -690,6 +727,8 @@ async function localTick($) {
       let stage;
       try { stage = await processLocalHint($, hint); }
       catch (error) {
+        // A retryable hold must reach the tick handler so the claim stays open.
+        if (error?.retryable) throw error;
         // A transient preview/page miss is not a host denial. Leave the claim
         // unacknowledged so the same hint can be fetched again.
         if (localAttempt?.attempt_id !== hint.attempt_id || localAttempt.generation !== hint.generation) throw error;
@@ -708,10 +747,28 @@ async function localTick($) {
     delay = 0;
   } catch (error) {
     if (leaseMayHaveChanged(error) || !localLease) {
-      try { await refreshLocalLease($); } catch { /* retry without changing owner */ }
+      // Re-arm: the daemon may have restarted. Re-read the lease file, then
+      // keep retrying with backoff instead of surrendering ownership to polling.
+      try { await refreshLocalLease($); localReconnects += 1; } catch { /* keep owner */ }
     }
-    localError = "local delivery request or generation failed; no polling fallback";
-    delay = 1000;
+    if (error?.retryable) {
+      busyRetries += 1;
+      if (busyRetries > MAX_BUSY_RETRIES) {
+        // Stop spinning. Record a terminal hold for this exact event so the
+        // polling path cannot smuggle it in later, and park the owner briefly.
+        try { await saveLocalAttempt($, error.hint, "held", false); } catch { /* keep state */ }
+        busyRetries = 0;
+        localError = "host stayed busy; delivery held, no polling fallback";
+        delay = 30000;
+      } else {
+        localError = `host busy; retry ${busyRetries}/${MAX_BUSY_RETRIES}`;
+        delay = Math.min(8000, 2000 * busyRetries);
+      }
+    } else {
+      localReconnects += 1;
+      localError = "local delivery request or generation failed; retrying, no polling fallback";
+      delay = Math.min(5000, 500 * Math.max(1, localReconnects));
+    }
   } finally {
     localBusy = false;
     if (localOwned && epoch === localEpoch) {
@@ -935,6 +992,7 @@ export function register(on, options) {
  */
 export const __internals = {
   poll,
+  classifySubmitResult,
   localTick,
   renewLocal,
   deliver,

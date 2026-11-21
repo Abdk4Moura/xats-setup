@@ -8,6 +8,9 @@ export type DeliverySkipReason =
   | 'auto_poke_disabled'
   | 'recipient_active'
   | 'retry_exhausted'
+  // Stored durably, but the recipient was past the reachability window, so no
+  // wake was attempted. The mailbox owns the message; nothing claims delivery.
+  | 'queued_unreachable'
 
 export interface DeliveryStatusRow {
   agent_id: string
@@ -24,7 +27,7 @@ export function recordInitialDeliveryStatuses(
     messageId: string
     recipients: string[]
     delivered: Set<string>
-    skipped: Array<{ agent_id: string; reason: AutoPokeSkipReason }>
+    skipped: Array<{ agent_id: string; reason: DeliverySkipReason }>
     autoPokeDisabled?: boolean
   }
 ): void {
