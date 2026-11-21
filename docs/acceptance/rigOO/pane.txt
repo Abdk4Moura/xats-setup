@@ -1,0 +1,50 @@
+  Call mcp__cross-agent-teams__get_inbox to read the full bodies and act on them.
+  </xats-inbox>
+
+  This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.
+
+  Called cross-agent-teams
+
+● ok
+
+✻ Crunched for 0s · done 6:08 PM
+
+› Prompt from the xats plugin
+❯ The xats plugin sent a message:
+  <xats-inbox>
+  1 cross-agent notice(s):
+  - #4 from oo-sender (needs reply)
+
+  Call mcp__cross-agent-teams__get_inbox to read the full bodies and act on them.
+  </xats-inbox>
+
+  This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.
+
+  Called cross-agent-teams
+
+● ok
+
+✻ Cogitated for 0s · done 6:08 PM
+
+› Prompt from the xats plugin
+❯ The xats plugin sent a message:
+  <xats-inbox>
+  1 cross-agent notice(s):
+  - #5 from oo-sender (needs reply)
+
+  Call mcp__cross-agent-teams__get_inbox to read the full bodies and act on them.
+  </xats-inbox>
+
+  This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.
+
+  Called cross-agent-teams
+
+● ok
+
+✻ Sautéed for 0s · done 6:09 PM
+✦ xats · claude-vps3584156-oo-af69c0c8                                                                                                                                                                                  [-]
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ ok
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

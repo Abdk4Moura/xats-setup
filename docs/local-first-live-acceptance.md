@@ -1,11 +1,35 @@
 # Local-first live acceptance on a real Claude Code host
 
-Status: run on 2026-11-20 and 2026-11-21 on this VPS in isolated rigs, with a real
-host and a real model (not a stub). The installed CLI is **Claude Code 2.1.330**;
-an earlier revision of this file wrongly said 2.1.295. Where a result depended on a
-specific head, the head is named next to it.
+Status: run on 2026-11-20 and 2026-11-21 on this VPS in isolated rigs. The final
+run (**rigOO**, below) pinned **Claude Code 2.1.295**, the version the criterion
+names, and its artifacts are committed under `docs/acceptance/rigOO/`. Earlier
+runs used the then-installed 2.1.330 and a real model; rigOO uses a local
+Anthropic-shaped stub model so the run needs no account or quota. In every run
+the host binary, the plugin, the daemon, the MCP transport and the mailbox are
+real. Where a result depended on a specific head, the head is named next to it.
 
-## Rig setup
+## Final acceptance run (rigOO)
+
+One isolated rig, pinned host **2.1.295**, `XATS_LOCAL_DELIVERY=1` on daemon and
+client, `XATS_BASE` pinned to the rig, no production writes. The full bundle is
+committed at [`docs/acceptance/rigOO/`](acceptance/rigOO/README.md): the driver,
+the daemon log, the pane capture, and the outbox, attempt, fact, cursor and lease
+tables.
+
+| Criterion | Evidence from this run |
+|---|---|
+| 1. no refused-then-consumed | A **real host refusal**: the `UserPromptSubmit` hook exited 2, `prompt.submit` resolved `{drop}`, the plugin classified it `refused`. Outbox stayed `refused`, facts `claimed, refused`, and a later real implicit inbox read left both unchanged. |
+| 2. one owner for `auto_poke:false` | `poked:false`; exactly **1** attempt; facts `claimed` -> `host-queued` -> `inbox-consumed`, generation 1; cursor 3 -> 4; pane showed `✦ xats · 1 notice pending · 1 needs reply`. |
+| 3. restart resumes without `/mcp` | At kill `claimed`/generation 1; after restart released to `stored`/null; then `claimed`/generation 1 and `inbox-consumed`/generation 1; cursor 4 -> 5; exactly one `mcp lazy rebind`; no `/mcp` in the pane. |
+| 4. aged recipient stored | Send to a recipient last seen 300 s ago returned `queued_unreachable: true, unreachable_seconds: 300`; the body `OO-C4-reply-payload` was retrievable from the mailbox. |
+
+`host-queued` is the line that was missing before: the real host resolves
+`prompt.submit` to `PromptSubmitResult` (`{text}` on entry, `{drop}` on refusal)
+with no `ok` field, so every successful submit used to be recorded `unknown`.
+`f17af7a` reads the real shapes, and `test/claude-mod-local-delivery.test.mjs`
+now pins them.
+
+## Rig setup (earlier runs)
 
 Two rigs, both isolated from the production bus:
 
@@ -18,13 +42,13 @@ directory, and tmux session. Claude ran with `--setting-sources ''` plus explici
 `assets/claude/mod`, `--strict-mcp-config` with a single MCP entry for the rig
 daemon, and `XATS_BASE` pinned so the hook could not fall back to `~/.xats/port`.
 
-Raw rig artifacts are not committed. They stay under
-`/root/.cache/xats-tasks/rigL`, `rigO`, `rigN` and the earlier rig directories on
-the machine that ran them: `daemon.log`, `state/data.db`, `pane.log` and
-`result.json` per rig. The numbers quoted below are read from those files, and the
-reproducible proof of criterion 3 is the committed test
-`test/local-delivery-restart.test.mjs`, which starts a real daemon, kills it, and
-restarts it against the same database.
+The final run's artifacts are committed under `docs/acceptance/rigOO/`. Earlier
+runs stayed under `/root/.cache/xats-tasks/rigL`, `rigO`, `rigN` and the earlier
+rig directories on the machine that ran them: `daemon.log`, `state/data.db`,
+`pane.log` and `result.json` per rig. The numbers quoted for those runs are read
+from those files. The reproducible proof of criterion 3 is also the committed
+test `test/local-delivery-restart.test.mjs`, which starts a real daemon, kills
+it, and restarts it against the same database.
 
 ## Verified working
 
