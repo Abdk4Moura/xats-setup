@@ -75,6 +75,7 @@ let localCanFallback = true;
 // Bounded re-arm/retry accounting: after a daemon restart the owner keeps
 // trying instead of falling back to polling or waiting for a manual /mcp.
 let localReconnects = 0;
+let lastRebindAt = 0;
 let busyRetries = 0;
 const MAX_BUSY_RETRIES = 6;
 let localError = "";
@@ -719,6 +720,13 @@ async function localTick($) {
   let delay = 250;
   try {
     if (!localLease) await refreshLocalLease($);
+    // Throttled, idempotent rebind attempt: after a restart this re-attaches the
+    // identity before the model needs get_inbox, so recovery needs no turn and
+    // no manual /mcp. Steady state answers 409 binding_not_lost immediately.
+    if (localLease && Date.now() - lastRebindAt > 3000) {
+      lastRebindAt = Date.now();
+      await rebindLocal($);
+    }
     if (!localAck) {
       let data;
       try {
