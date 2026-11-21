@@ -166,3 +166,48 @@ test('a lease that lapsed while the daemon was down keeps its holder deliverable
     await stopDaemon(daemon?.proc)
   }
 })
+
+test('a claim left unacknowledged by a crash is offered again, not stranded', { skip: !Database || !fs.existsSync(CLI), timeout: 120000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-stranded-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  const port = await freePort()
+  let daemon = await startDaemon(t, dir, port)
+  const db = () => new Database(path.join(dir, 'data.db'))
+  try {
+    const rcpt = await post(daemon.base, '/api/register', {
+      name: 'stranded-agent', team: 'default', agent_type: 'claude-code',
+      session_key: 'sess-stranded', name_mode: 'exact', bind_mcp: true, local_delivery: true,
+    })
+    const token = rcpt.data.local_delivery.token
+    await post(daemon.base, '/api/register', { name: 'stranded-sender', team: 'default', agent_type: 'custom' })
+    const sent = await post(daemon.base, '/api/send', {
+      from: { team: 'default', name: 'stranded-sender' }, to: { agent_id: rcpt.data.agent_id }, body: 'claimed then crash',
+    })
+    // Claim it and die before the ack: the crash leaves an unacknowledged claim.
+    const waited = await fetch(`${daemon.base}/api/local-delivery/wait?timeout_ms=2000`, {
+      headers: { 'X-Xats-Delivery-Token': token }, signal: AbortSignal.timeout(5000),
+    })
+    assert.ok((await waited.json()).hints?.[0])
+    let conn = db()
+    assert.equal(conn.prepare('SELECT status FROM local_delivery_outbox WHERE message_id=?').get(sent.data.message_id).status, 'claimed')
+    conn.close()
+
+    await stopDaemon(daemon.proc, 'SIGKILL')
+    daemon = await startDaemon(t, dir, port)
+
+    conn = db()
+    const recovered = conn.prepare('SELECT status, generation FROM local_delivery_outbox WHERE message_id=?').get(sent.data.message_id)
+    conn.close()
+    assert.deepEqual(recovered, { status: 'stored', generation: null },
+      'an unacknowledged claim must return to stored so it can be offered again')
+
+    const again = await fetch(`${daemon.base}/api/local-delivery/wait?timeout_ms=2000`, {
+      headers: { 'X-Xats-Delivery-Token': token }, signal: AbortSignal.timeout(5000),
+    })
+    const hint = (await again.json()).hints?.[0]
+    assert.ok(hint, 'the recovered row must be claimable again')
+    assert.equal(hint.generation, 1, 'under the holder’s existing generation')
+  } finally {
+    await stopDaemon(daemon?.proc)
+  }
+})

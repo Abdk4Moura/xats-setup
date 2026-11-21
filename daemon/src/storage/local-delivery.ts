@@ -202,22 +202,31 @@ export class LocalDeliveryStore {
   }
 
   /**
-   * Give every live holder a fresh lease window after a daemon restart.
+   * Recover delivery state after a daemon restart.
    *
-   * A holder could not renew while the process was down, and its window may
-   * expire moments after the restart even though the client is healthy. Extending
-   * only already-lapsed leases is not enough: the observed failure was a 401 at
-   * the exact original `expiresAt`, mid-delivery. So extend every unrevoked lease.
+   * Two things must be true for the plugin to resume without a model turn:
    *
-   * Nothing else is touched. A claim that was in flight when the process died is
-   * left `unknown`, because that write may have reached a host; refused and held
-   * decisions are never rewritten.
+   *  1. The lease window is extended for every unrevoked holder. A client could
+   *     not renew while the process was down, and the observed failure was a 401
+   *     at the exact original `expiresAt`, mid-delivery.
+   *  2. A claim that was never acknowledged goes back to `stored`. An ACK is the
+   *     only proof of host admission, so an unacknowledged claim is by definition
+   *     unconfirmed; leaving it `unknown` stranded it permanently, because claim()
+   *     will not re-offer an unknown row under the same generation.
+   *
+   * Refused and held decisions are never touched: they are terminal host answers.
    */
   rearmAfterRestart(now = Date.now()): number {
     time(now)
-    return Number(this.db.prepare(
-      'UPDATE local_delivery_leases SET expires_at = ? WHERE revoked_at IS NULL',
-    ).run(now + DEFAULT_TTL).changes)
+    return this.db.transaction(() => {
+      const extended = this.db.prepare(
+        'UPDATE local_delivery_leases SET expires_at = ? WHERE revoked_at IS NULL',
+      ).run(now + DEFAULT_TTL).changes
+      const released = this.db.prepare(`UPDATE local_delivery_outbox
+        SET status = 'stored', attempt_id = NULL, generation = NULL, updated_at = ?
+        WHERE status IN ('claimed', 'transport-written', 'unknown')`).run(now).changes
+      return Number(extended) + Number(released)
+    })()
   }
 
   revokeAgent(agentId: string, now = Date.now()): void {
