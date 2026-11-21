@@ -615,6 +615,7 @@ async function renewLocal($) {
     else await refreshLocalLease($);
     localError = "";
   } catch (error) {
+    await tickLog($, `error ${error?.code || error?.name || "err"} status=${error?.status ?? "-"}`)
     if (leaseMayHaveChanged(error) || error?.status === 404) {
       try { await refreshLocalLease($); localError = ""; return; } catch { /* retain ownership */ }
     }
@@ -727,7 +728,23 @@ async function processLocalHint($, hint) {
   return stage;
 }
 
+/** Diagnostics only, enabled by XATS_DEBUG_TICK=1: one append-only line per tick. */
+let tickDebugOn = null;
+async function tickLog($, line) {
+  try {
+    if (tickDebugOn === null) tickDebugOn = String(await $.env.get("XATS_DEBUG_TICK")) === "1";
+    if (!tickDebugOn) return;
+    const home = (await $.env.get("HOME")) || (await $.env.get("USERPROFILE")) || "";
+    const file = `${home}/.xats/tick.log`;
+    let prior = "";
+    try { prior = String((await $.fs.read(file)) ?? ""); } catch { prior = ""; }
+    const kept = prior.split("\n").slice(-200).join("\n");
+    await $.fs.write(file, `${kept}${kept ? "\n" : ""}${new Date().toISOString()} ${line}\n`);
+  } catch { /* diagnostics must never break delivery */ }
+}
+
 async function localTick($) {
+  await tickLog($, `tick busy=${localBusy} owned=${localOwned} lease=${localLease ? "yes" : "no"}`)
   if (!localOwned || localBusy) return;
   localBusy = true;
   const epoch = localEpoch;
@@ -816,6 +833,7 @@ async function localTick($) {
     }
   } finally {
     localBusy = false;
+    await tickLog($, `reschedule delay=${delay}`)
     if (localOwned && epoch === localEpoch) {
       $.clock.after(delay, () => { if (epoch === localEpoch) void localTick($); });
     }

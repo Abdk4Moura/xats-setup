@@ -202,22 +202,22 @@ export class LocalDeliveryStore {
   }
 
   /**
-   * Recover a lease that lapsed only because the daemon was down.
+   * Give every live holder a fresh lease window after a daemon restart.
    *
-   * A holder that is still online could not renew while the process was gone, so
-   * a lapsed-but-not-revoked lease is extended instead of being treated as a dead
-   * client. That is what lets a row that was `stored` at the crash be claimed
-   * again with a generation, without a model turn.
+   * A holder could not renew while the process was down, and its window may
+   * expire moments after the restart even though the client is healthy. Extending
+   * only already-lapsed leases is not enough: the observed failure was a 401 at
+   * the exact original `expiresAt`, mid-delivery. So extend every unrevoked lease.
    *
-   * Deliberately nothing else: a claim that was already in flight stays `unknown`,
-   * because that write may have reached the host and must not be blindly retried.
-   * Refused and held decisions are never touched.
+   * Nothing else is touched. A claim that was in flight when the process died is
+   * left `unknown`, because that write may have reached a host; refused and held
+   * decisions are never rewritten.
    */
   rearmAfterRestart(now = Date.now()): number {
     time(now)
     return Number(this.db.prepare(
-      'UPDATE local_delivery_leases SET expires_at = ? WHERE revoked_at IS NULL AND expires_at < ?',
-    ).run(now + DEFAULT_TTL, now).changes)
+      'UPDATE local_delivery_leases SET expires_at = ? WHERE revoked_at IS NULL',
+    ).run(now + DEFAULT_TTL).changes)
   }
 
   revokeAgent(agentId: string, now = Date.now()): void {

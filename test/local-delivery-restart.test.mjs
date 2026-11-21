@@ -152,7 +152,7 @@ test('a lease that lapsed while the daemon was down keeps its holder deliverable
     const again = await fetch(`${daemon.base}/api/local-delivery/wait?timeout_ms=2000`, {
       headers: { 'X-Xats-Delivery-Token': token }, signal: AbortSignal.timeout(5000),
     })
-    assert.equal(again.status, 200, 'a lapsed lease must still authenticate after a restart')
+    assert.equal(again.status, 200, 'a lease that lapsed while the daemon was down must authenticate after a restart')
     const hint = (await again.json()).hints?.[0]
     assert.ok(hint, 'the stored row must be claimable again after the restart')
     assert.ok(Number.isInteger(hint.generation) && hint.generation >= 1)
