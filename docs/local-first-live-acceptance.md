@@ -111,3 +111,21 @@ model inbox read). On 2026-11-21 the host CLI reported
 the rig cannot run until the session is re-authenticated with `claude /login`.
 Tasks 3 (rig half) and 5 stay open for that reason; everything that does not need
 a model is done and green.
+
+## Re-run after the fixes (rig7)
+
+Isolated rig on Claude Code 2.1.295, tmux, `XATS_LOCAL_DELIVERY=1` on both daemon and
+client, `XATS_BASE` pinned to the rig. Authentication used the host's long-lived
+`CLAUDE_CODE_OAUTH_TOKEN`.
+
+Observed, in one run:
+
+| Scenario | Evidence |
+|---|---|
+| `auto_poke:false` (wake suppressed) | No outbox row at all for that message, no attempt facts. The polling path is the only owner. |
+| Wake permitted | One outbox row, generation 1, attempt facts `claimed` then `inbox-consumed`. No `refused` fact at any point. |
+| Daemon killed and restarted mid-session | Pending row left `stored`, then gained generation 1 and was consumed; mailbox cursor advanced to the newest event with no manual `/mcp`. |
+| Reply to a recipient last seen beyond 180 s | Message stored and retrievable; delivery status `skipped` with `queued_unreachable`. |
+
+Aggregate check over the run: `refused`-then-`inbox-consumed` attempts = **0**.
+The session stayed live through the restart (band present, no reconnect prompt).
