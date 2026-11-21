@@ -524,3 +524,22 @@ test('busy submit retries at the next turn boundary and then succeeds', async ()
   assert.equal(f.submits.length, 2)
   assert.deepEqual(f.acks[0], { attempt_id: hint.attempt_id, stage: 'host-queued' })
 })
+
+test('re-arms after a daemon restart without surrendering ownership to polling', async () => {
+  const options = {}
+  const f = fake(options)
+  await connect(f)
+  // The daemon goes away: the long-poll fails with a connection error.
+  options.fetch = async (url) => {
+    if (url.includes('/wait?')) throw new Error('connect ECONNREFUSED 127.0.0.1:9100')
+  }
+  await mod.localTick(f.$)
+  assert.equal(mod.state().localOwned, true, 'ownership must survive the restart')
+  assert.equal(f.requests.some((r) => r.url.includes('/api/inbox')), false,
+    'no polling fallback while the local owner is recovering')
+  // The daemon comes back on the same lease: the same claim is delivered.
+  options.fetch = undefined
+  await mod.localTick(f.$)
+  assert.deepEqual(f.acks[0], { attempt_id: hint.attempt_id, stage: 'host-queued' })
+  assert.equal(f.submits.length, 1, 'exactly one host submission after recovery')
+})
