@@ -75,11 +75,6 @@ let localCanFallback = true;
 // Bounded re-arm/retry accounting: after a daemon restart the owner keeps
 // trying instead of falling back to polling or waiting for a manual /mcp.
 let localReconnects = 0;
-let lastRebindAt = 0;
-// Set when a restart dropped the binding and the daemon re-attached this identity.
-// In that window the host submit is unreliable, so a notice may surface the
-// pending mail for a real inbox read. Refusals and holds still block this.
-let noticeAfterRebind = false;
 let busyRetries = 0;
 const MAX_BUSY_RETRIES = 6;
 let localError = "";
@@ -416,7 +411,7 @@ function scheduleDelivery($) {
 }
 
 async function poll($) {
-  if ((localOwned && !noticeAfterRebind) || polling) return;
+  if (localOwned || polling) return;
   polling = true;
   polls += 1;
   try {
@@ -438,8 +433,7 @@ async function poll($) {
         lastEventId = Math.max(lastEventId, Number(message.event_id) || 0);
         // Even an explicit transport opt-out must not replay a message that a
         // previous local owner held, refused, or may already have submitted.
-        const prior = localOutcomes[Number(message.event_id)];
-        if (prior && !(noticeAfterRebind && prior.stage === "unknown")) continue;
+        if (localOutcomes[Number(message.event_id)]) continue;
         pending.push(message);
         recent.push(message);
       }
@@ -586,28 +580,6 @@ function leaseMayHaveChanged(error) {
   return [401, 403, 409, 410].includes(error?.status);
 }
 
-/**
- * Ask the daemon to re-attach this identity to the live host session after a
- * restart dropped the in-memory binding. Fail-closed: the daemon refuses unless
- * exactly one session is unbound and this lease owns the identity.
- */
-async function rebindLocal($) {
-  if (!localLease) return false;
-  try {
-    const data = await localRequest($, "rebind", {});
-    // Only the daemon's explicit success (with the generation it re-attached)
-    // opens the notice window. Anything else means no rebind happened.
-    if (data?.ok !== true || typeof data?.generation !== "number") return false;
-    localError = "";
-    noticeAfterRebind = true;
-    return true;
-  } catch (error) {
-    // 409 binding_not_lost is the normal steady state, not a failure.
-    if (error?.status !== 409) localError = "rebind failed; will retry";
-    return false;
-  }
-}
-
 async function renewLocal($) {
   if (!localOwned) return;
   try {
@@ -728,10 +700,6 @@ async function localTick($) {
   let delay = 250;
   try {
     if (!localLease) await refreshLocalLease($);
-    if (localLease && !localAck && Date.now() - lastRebindAt > 3000) {
-      lastRebindAt = Date.now();
-      await rebindLocal($);
-    }
     // Throttled, idempotent rebind attempt: after a restart this re-attaches the
     // identity before the model needs get_inbox, so recovery needs no turn and
     // no manual /mcp. Steady state answers 409 binding_not_lost immediately.

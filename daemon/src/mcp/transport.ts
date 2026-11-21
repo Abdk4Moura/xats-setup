@@ -293,6 +293,22 @@ export function mountMcp(
     // Strip it BEFORE the MCP SDK validates strict per-tool argument schemas.
     // Never select an agent by name, PID, or recent activity. An invalid token
     // from an unbound caller is rejected; no token preserves unknown_agent.
+    // A daemon restart drops every in-memory binding. Bind the session that is
+    // ACTUALLY calling, at call time, and only when exactly one identity lost its
+    // binding. Background rebinds are racy: the client replaces its session and
+    // the binding lands on a dead one. Zero or several lost identities is refused.
+    if (session && body?.method === 'tools/call' &&
+        !session.capabilityBoundAgentId && !session.agentIdHolder.current) {
+      const lost = db.prepare('SELECT agent_id, team FROM agents WHERE binding_lost = 1').all() as Array<{ agent_id: string; team: string }>
+      if (lost.length === 1) {
+        session.bindAgent(lost[0].agent_id, lost[0].team)
+        db.prepare('UPDATE agents SET binding_lost = 0 WHERE agent_id = ?').run(lost[0].agent_id)
+        log(`mcp lazy rebind: sid=${session.sessionId} agent=${lost[0].agent_id}`)
+      } else if (lost.length > 1) {
+        log(`mcp lazy rebind refused: ${lost.length} identities lost their binding`)
+      }
+    }
+
     if (session && body?.method === 'tools/call') {
       const args = body.params?.arguments
       const hasToken = args && Object.prototype.hasOwnProperty.call(args, 'xats_bind_token')
@@ -440,22 +456,5 @@ export function mountMcp(
     }
   }
 
-  // Fail-closed rebind for a reconnecting host. Binds only when exactly one
-  // session is unbound; zero or several is refused rather than guessed, so a
-  // session can never claim an identity that might belong to another host.
-  function rebindUniqueUnbound(agentId: string, team: string):
-    { ok: true } | { ok: false; reason: 'none' | 'ambiguous' } {
-    const unbound = [...sessions.values()].filter(
-      (session) => !session.capabilityBoundAgentId && !sessionOwners.has(session.sessionId),
-    )
-    if (unbound.length === 0) return { ok: false, reason: 'none' }
-    if (unbound.length > 1) return { ok: false, reason: 'ambiguous' }
-    const session = unbound[0]
-    session.capabilityBoundAgentId = agentId
-    session.bindAgent(agentId, team)
-    log(`mcp rebind: sid=${session.sessionId} agent=${agentId}`)
-    return { ok: true }
-  }
-
-  return { reapOrphanSessions, sessionMetrics, rebindUniqueUnbound }
+  return { reapOrphanSessions, sessionMetrics }
 }
