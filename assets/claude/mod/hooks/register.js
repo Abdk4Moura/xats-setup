@@ -383,12 +383,26 @@ async function deliver($) {
     // Plain submit: Claude Code attributes this to the plugin. `asUser` is not
     // an option here — peer mail must never look like the person typed it.
     const result = await $.prompt.submit({ text: payloadText(batch) });
-    if (result?.ok === false) throw new Error(result.error || "prompt_submit_refused");
-    submitOk += 1;
-    await persistAcceptedCursor($, batch);
-    submitFailures = 0;
-    nextSubmitAt = 0;
-    lastSubmitError = "";
+    const stage = classifySubmitResult(result);
+    if (stage === "refused" || stage === "held") {
+      // An explicit host refusal or hold is a decision: the polling path must
+      // never resubmit it.
+      lastSubmitError = typeof result?.drop === "string"
+        ? `prompt ${stage}: ${result.drop}`
+        : `local delivery ${stage}; no automatic resubmit`;
+      batch = [];
+      submitFailures = 0;
+      nextSubmitAt = 0;
+    } else if (stage === "host-queued" || stage === "transport-written") {
+      submitOk += 1;
+      await persistAcceptedCursor($, batch);
+      submitFailures = 0;
+      nextSubmitAt = 0;
+      lastSubmitError = "";
+    } else {
+      // Unconfirmed (busy, held, or unclassifiable): retry at the turn boundary.
+      throw new Error(result?.error || result?.reason || "prompt submit not confirmed");
+    }
   } catch (error) {
     lastSubmitError = String(error && error.message ? error.message : error);
     // A busy turn may refuse a prompt. Keep the batch and retry on later polls,
@@ -515,6 +529,19 @@ async function localRequest($, route, body, lease = localLease) {
  */
 function classifySubmitResult(result) {
   if (result === undefined) return "transport-written";
+  // The real host resolves prompt.submit to PromptSubmitResult: { text,
+  // context?, origin? } when the prompt entered, { drop: reason } when a hook
+  // refused it. There is no `ok` field, so the shapes are read directly rather
+  // than guessed; anything else keeps the evidence-based checks below.
+  if (result && typeof result === "object") {
+    if (typeof result.drop === "string") {
+      // A drop means the prompt did not enter. Busy is still retryable; any
+      // other reason is the host's explicit refusal and therefore terminal.
+      if (/busy|in.?progress|mid.?turn|turn|queued|running|not.?idle|interrupt/i.test(result.drop)) return "busy";
+      return "refused";
+    }
+    if (typeof result.text === "string") return "host-queued";
+  }
   if (result?.ok === true) return "host-queued";
   const stage = String(result?.stage ?? result?.status ?? "").toLowerCase();
   if (stage === "held") return "held";
@@ -803,7 +830,14 @@ async function localTick($) {
       localAck = null;
       return;
     }
-    await localRequest($, "ack", { attempt_id: localAck.attempt_id, stage: localAck.stage });
+    try {
+      await localRequest($, "ack", { attempt_id: localAck.attempt_id, stage: localAck.stage });
+    } catch (error) {
+      // The daemon does not know this attempt any more (a restart released it).
+      // Keeping the ACK would retry it forever and starve the next wait.
+      if ([404, 409, 410].includes(error?.status)) { localAck = null; throw error; }
+      throw error;
+    }
     localAck = null;
     localError = "";
     delay = 0;

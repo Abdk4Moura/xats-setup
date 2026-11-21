@@ -77,6 +77,12 @@ for (const [label, options, stage] of [
   ['uncertain exception', { throws: true }, 'unknown'],
   ['unclassifiable failure', { result: { busy: true } }, 'unknown'],
   ['actual MCP read', { cursor: 7 }, 'inbox-consumed'],
+  // The shipped host resolves `prompt.submit` to PromptSubmitResult:
+  // `{ text, context?, origin? }` when the prompt entered, `{ drop }` when a
+  // hook refused it. There is no `ok` field, so these are the real shapes.
+  ['host entry (real shape)', { result: { text: '<xats-inbox> notice' } }, 'host-queued'],
+  ['host entry empty text', { result: { text: '' } }, 'host-queued'],
+  ['host drop (explicit refusal)', { result: { drop: 'blocked by a settings hook' } }, 'refused'],
 ]) test(`${label} reports only proven stage and never falls back or resubmits`, async () => {
   const f = fake(options)
   await connect(f)
@@ -492,6 +498,8 @@ const classify = mod.classifySubmitResult
 test('busy host result is retryable, never a refusal', () => {
   assert.equal(classify({ ok: false, error: 'busy: a turn is already running' }), 'busy')
   assert.equal(classify({ ok: false, reason: 'turn in progress' }), 'busy')
+  // The real host's refusal shape is a `drop`; a busy reason stays retryable.
+  assert.equal(classify({ drop: 'a turn is in progress' }), 'busy')
   // An explicit host hold is a real hold, not a busy retry.
   assert.equal(classify({ ok: false, status: 'held' }), 'held')
 })
