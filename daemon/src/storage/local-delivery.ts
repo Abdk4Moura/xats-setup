@@ -201,6 +201,44 @@ export class LocalDeliveryStore {
       WHERE agent_id = ? AND revoked_at IS NULL`).run(now, agentId)
   }
 
+  /**
+   * Re-arm existing holders after a daemon restart.
+   *
+   * MCP session bindings die with the process, but a holder's bearer token is
+   * still the same trusted client. Give it a NEW generation with the SAME token,
+   * so attempts left uncertain by the crash become retryable (claim only retries
+   * unknown attempts under a different generation) without waiting for a model
+   * turn. Refused and held decisions are untouched: retire() only rewrites
+   * claimed/transport-written.
+   */
+  rearmAfterRestart(now = Date.now()): number {
+    time(now)
+    return this.db.transaction(() => {
+      // Only agents that actually had a claim in flight are re-armed. A healthy
+      // generation must not move on every clean start, or the client's persisted
+      // generation would go stale for no reason.
+      const leases = this.db.prepare(`SELECT l.agent_id, l.session_key, l.token_hash
+        FROM local_delivery_leases l
+        WHERE l.revoked_at IS NULL AND EXISTS (
+          SELECT 1 FROM local_delivery_outbox o
+          WHERE o.agent_id = l.agent_id AND o.status IN ('claimed', 'transport-written'))`)
+        .all() as Array<{ agent_id: string; session_key: string; token_hash: string }>
+      for (const lease of leases) {
+        this.retire(lease.agent_id, now)
+        // The old row must go: token_hash is UNIQUE and the same holder keeps it.
+        this.db.prepare('DELETE FROM local_delivery_leases WHERE agent_id=? AND revoked_at IS NOT NULL')
+          .run(lease.agent_id)
+        const endpoint = this.db.prepare(`INSERT INTO local_delivery_endpoints (agent_id, generation)
+          VALUES (?, 1) ON CONFLICT(agent_id) DO UPDATE SET generation = generation + 1
+          RETURNING generation`).get(lease.agent_id) as { generation: number }
+        this.db.prepare(`INSERT INTO local_delivery_leases
+          (agent_id, generation, session_key, token_hash, expires_at) VALUES (?, ?, ?, ?, ?)`)
+          .run(lease.agent_id, endpoint.generation, lease.session_key, lease.token_hash, now + DEFAULT_TTL)
+      }
+      return leases.length
+    })()
+  }
+
   revokeAgent(agentId: string, now = Date.now()): void {
     time(now)
     this.db.transaction(() => this.retire(agentId, now))()

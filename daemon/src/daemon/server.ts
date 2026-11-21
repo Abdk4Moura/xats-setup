@@ -8,6 +8,7 @@ import { makeAuthHook } from './auth.js'
 import { mountMcp } from '../mcp/transport.js'
 import { mountRestApi } from './rest-api.js'
 import { runCleanup } from './cleanup.js'
+import { LocalDeliveryStore } from '../storage/local-delivery.js'
 import { SseFanout } from './sse-fanout.js'
 import { ChannelWakeFanout } from './channel-wake-fanout.js'
 import { clearAllRetries } from '../mcp/poke-retry.js'
@@ -64,6 +65,9 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
   // Bindings do not survive this process. Mark them reclaimable so a
   // reconnecting session keeps its own agent_id instead of getting a -2.
   db.exec('UPDATE agents SET binding_lost = 1 WHERE session_key IS NOT NULL')
+  // Re-arm delivery for holders whose lease survived the process, so a pending
+  // row is claimable under a new generation without waiting for a model turn.
+  try { new LocalDeliveryStore(db).rearmAfterRestart() } catch { /* best effort */ }
   const claudeBind = new ClaudeBindCapabilities(db, context.localDevice)
   const startedAt = Date.now()
   const version = '0.1.0'
