@@ -182,3 +182,28 @@ through a normal inbox read in a user turn, not through the plugin's submit. No
 `/mcp` reconnect was needed, and the row reconciled to `inbox-consumed` once the
 message was genuinely read. This is a real resume of delivery to the same mailbox,
 but it is not evidence of working post-restart prompt submission.
+
+## Final verification (rigI)
+
+Run on head `bdedda3` with `XATS_LOCAL_DELIVERY=1` on both daemon and client,
+`XATS_BASE` pinned to the rig, Claude Code in tmux.
+
+| Criterion | Evidence from this run |
+|---|---|
+| 1. No refused-then-consumed attempt | aggregate query returned **0**; the plugin may only reconcile `unknown` with a real read, and a focused test reproduces the old bypass and now fails to reproduce it |
+| 2. `auto_poke:false` has exactly one owner | outbox row `inbox-consumed`, generation 1, facts `claimed` -> `inbox-consumed`; polling returns early while the local owner is active |
+| 3. Restart resumes without `/mcp` | cursor 1 before restart; pending row `inbox-consumed`, generation 1 afterwards; one `mcp lazy rebind` log line; single identity, `binding_lost` 0; no `/mcp` prompt |
+| 4. Aged recipient stored | message row present, status `skipped` / `queued_unreachable` |
+
+Focused tests added or updated for each behaviour: `test/local-delivery-owner.test.mjs`
+(ownership, queued-unreachable), `test/claude-mod-local-delivery.test.mjs` (busy vs
+refused, refusal never rewritten, re-arm), `test/agent-identity-durability.test.mjs`
+(reclaim after a lost binding), `test/binding-recovery.test.mjs` (fail-closed rebind
+rule), `test/local-delivery-api.test.mjs` (single owner, broadcast isolation).
+
+Two limits are stated rather than hidden. The host still rejects the plugin's own
+prompt submission after a restart, so the pending mail reached the model through a
+real inbox read in a user turn; the attempt journal records that submit as `unknown`
+and is reconciled to `inbox-consumed` only after the read. And no live host refusal
+was induced in this rig, because the local-first path cannot force one; the
+invariant is proven by the focused test rather than by a live refusal.
