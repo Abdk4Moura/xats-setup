@@ -461,16 +461,40 @@ async function poll($) {
 
 // Local delivery credentials never appear in URLs or diagnostics. Once a wait
 // may have claimed work, failures cannot re-enable the legacy submitter.
+/**
+ * Bound a host request with the mods clock. `$.http.fetch` has no timeout and a
+ * daemon that dies mid-request can leave the promise unsettled forever; without
+ * this the delivery tick latches `localBusy`, never reschedules, and the plugin
+ * silently stops delivering after a restart. The clock is also what the tests
+ * drive, so this is deterministic rather than sleep-based.
+ */
+function withClockDeadline($, promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    $.clock.after(ms, () => {
+      if (settled) return;
+      settled = true;
+      const error = new Error(`${label} timed out`);
+      error.code = "ETIMEDOUT";
+      reject(error);
+    });
+    promise.then((value) => { if (!settled) { settled = true; resolve(value); } },
+      (error) => { if (!settled) { settled = true; reject(error); } });
+  });
+}
+
 async function localRequest($, route, body, lease = localLease) {
   const base = await baseUrl($);
-  const res = await $.http.fetch(`${base}/api/local-delivery/${route}`, {
+  // wait intentionally long-polls for up to 20s; everything else is quick.
+  const budget = String(route).startsWith("wait") ? 25000 : 8000;
+  const res = await withClockDeadline($, $.http.fetch(`${base}/api/local-delivery/${route}`, {
     method: body === undefined ? "GET" : "POST",
     headers: {
       "X-Xats-Delivery-Token": lease.token,
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  }), budget, "local delivery request");
   if (!res || res.ok === false || res.status >= 400) {
     const error = new Error("local delivery request failed");
     error.status = res?.status;
