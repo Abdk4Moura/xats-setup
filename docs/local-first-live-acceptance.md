@@ -137,3 +137,22 @@ reconnecting session must reclaim its previous identity instead of registering a
 one, so pending rows are delivered to the same mailbox and its cursor advances. That
 requires a daemon-side rule for reclaiming an identity whose MCP binding died with
 the process, plus a rerun of the rig to prove it.
+
+### rig9: identity reclaim works, delivery still blocked
+
+After the reclaim fix, the same restart scenario produced **one** Claude identity
+(`claude-...-rig9-2d79c9a9`, `binding_lost = 1`) instead of the previous `-2`
+split, so the identity regression is fixed.
+
+Delivery still did not resume. The post-restart row ended `unknown` (facts
+`claimed` -> `unknown`) and the mailbox cursor stayed at 1. The pane explains it:
+the model was stopped on a host confirmation prompt ("register as a new agent with
+the same name", Enter to confirm), so no turn ran and `prompt.submit` threw.
+
+Root cause: an MCP session's identity binding lives in daemon memory. After a
+restart the reconnecting session is unbound, `get_inbox` fails with
+`unknown_agent`, and the model's recovery path is a registration/prompt that blocks
+the turn. Criterion 3 therefore needs an explicit rebinding design: either the
+transport re-binds a session to an existing identity by a durable session key, or
+the plugin re-establishes the binding without a model turn. Both change the
+identity surface and need a decision before more code.
