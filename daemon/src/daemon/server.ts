@@ -61,6 +61,9 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     localDevice: opts.localDevice ?? resolveLocalDeviceLabel(),
   }
   applySchema(db, { localDevice: context.localDevice })
+  // Bindings do not survive this process. Mark them reclaimable so a
+  // reconnecting session keeps its own agent_id instead of getting a -2.
+  db.exec('UPDATE agents SET binding_lost = 1 WHERE session_key IS NOT NULL')
   const claudeBind = new ClaudeBindCapabilities(db, context.localDevice)
   const startedAt = Date.now()
   const version = '0.1.0'
