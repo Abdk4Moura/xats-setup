@@ -687,6 +687,9 @@ async function processLocalHint($, hint) {
     // A thrown submit is uncertainty, never a refusal.
     stage = "unknown";
     lastSubmitError = String(error?.message || error || "prompt submit failed");
+    // Diagnostics: the host error text is the only way to tell a busy host from a
+    // broken submit context. Never contains message bodies.
+    try { await $.fs.write(`${cursorPath}.submit.log`, `${new Date().toISOString()} ${lastSubmitError}\n`); } catch { /* best effort */ }
   }
   if (stage === "busy") {
     // Busy host: keep the claim, do not acknowledge, and retry at the next turn
