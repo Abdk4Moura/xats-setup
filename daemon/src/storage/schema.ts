@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3'
+import { initLocalDeliverySchema } from './local-delivery.js'
 
 const DDL = [
   `CREATE TABLE IF NOT EXISTS events (
@@ -245,6 +246,18 @@ function migrateMessagesNeedReplyColumn(db: Database.Database): void {
   db.exec(`ALTER TABLE messages ADD COLUMN need_reply INTEGER NOT NULL DEFAULT 1`)
 }
 
+// MCP session bindings live in memory and die with the daemon. This flag marks
+// an identity whose binding was lost, so a reconnecting session can reclaim its
+// own row by name instead of being suffixed into a second identity.
+function migrateAgentsBindingLostColumn(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name),
+  )
+  if (!cols.has('binding_lost')) {
+    db.exec('ALTER TABLE agents ADD COLUMN binding_lost INTEGER NOT NULL DEFAULT 0')
+  }
+}
+
 function dropLegacyTaskContractTables(db: Database.Database): void {
   db.exec(`DROP TABLE IF EXISTS tasks`)
   db.exec(`DROP TABLE IF EXISTS contracts`)
@@ -263,6 +276,8 @@ export function applySchema(
   // Zero is a valid unread cursor, not an uninitialized migration sentinel.
   // Schema initialization must never consume mail; actual inbox reads do that.
   migrateClaudeBindCodeColumns(db)
+  migrateAgentsBindingLostColumn(db)
+  initLocalDeliverySchema(db)
 }
 
 // The bind code lets the MODEL claim a session (a tool call it authored, which

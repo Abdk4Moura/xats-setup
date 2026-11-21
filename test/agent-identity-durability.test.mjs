@@ -164,3 +164,27 @@ test('federation forwards a well-formed peer ref and drops a malformed one', asy
   assert.equal(safeRosterAgent({ ...base, ref: '../../etc' }).ref, undefined);
   assert.equal(safeRosterAgent(base).ref, undefined);
 });
+
+test('an identity whose binding died with the daemon is reclaimed, not suffixed', { skip: !Database }, async t => {
+  const mods = await load(t);
+  const db = new Database(':memory:');
+  t.after(() => db.close());
+  mods.applySchema(db);
+  const repo = new mods.AgentsRepo(db);
+
+  const first = repo.register({ name: 'reclaim', team: 'default', agent_type: 'claude-code', session_key: 'sess-1', name_mode: 'exact' });
+  // The daemon restarted, so its in-memory MCP binding is gone but the row is
+  // still within the presence TTL.
+  db.prepare('UPDATE agents SET binding_lost = 1 WHERE agent_id = ?').run(first.agent_id);
+
+  const reclaimed = repo.register({ name: 'reclaim', team: 'default', agent_type: 'claude-code', session_key: 'sess-2', name_mode: 'prefer' });
+  assert.equal(reclaimed.agent_id, first.agent_id, 'the reconnecting session keeps its mailbox');
+  assert.equal(reclaimed.name, 'reclaim', 'no -2 identity is invented');
+  assert.equal(db.prepare('SELECT binding_lost FROM agents WHERE agent_id = ?').get(first.agent_id).binding_lost, 0);
+
+  // A live holder that still has its binding is not stolen.
+  const held = repo.register({ name: 'held', team: 'default', agent_type: 'claude-code', session_key: 'sess-3', name_mode: 'exact' });
+  const other = repo.register({ name: 'held', team: 'default', agent_type: 'claude-code', session_key: 'sess-4', name_mode: 'prefer' });
+  assert.notEqual(other.agent_id, held.agent_id);
+  assert.equal(other.name, 'held-2');
+});

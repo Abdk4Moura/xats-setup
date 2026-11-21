@@ -160,10 +160,10 @@ export class AgentsRepo {
     const findRow = (candidate: string) =>
       this.db
         .prepare(
-          `SELECT agent_id, agent_type, session_key, name, last_seen_at FROM agents WHERE device=? AND team=? AND name=?`
+          `SELECT agent_id, agent_type, session_key, name, last_seen_at, binding_lost FROM agents WHERE device=? AND team=? AND name=?`
         )
         .get(device, team, candidate) as
-        | { agent_id: string; agent_type: AgentType | null; session_key: string | null; name: string; last_seen_at: string }
+        | { agent_id: string; agent_type: AgentType | null; session_key: string | null; name: string; last_seen_at: string; binding_lost: number }
         | undefined
 
     let existing = findRow(requestedName)
@@ -187,9 +187,10 @@ export class AgentsRepo {
     if (existing) {
       const sameSession = sessionKey !== null && existing.session_key === sessionKey &&
         (existing.agent_type !== 'claude-code' || input.agent_type === 'claude-code')
-      const live = isAgentLive({ last_seen_at: existing.last_seen_at }, { ttlMs })
+      const bindingLost = Number(existing.binding_lost ?? 0) === 1
+      const live = isAgentLive({ last_seen_at: existing.last_seen_at }, { ttlMs }) && !bindingLost
       // A retained Claude mailbox cannot be taken over when its name ages out.
-      const retainedClaude = existing.agent_type === 'claude-code' && existing.session_key !== null
+      const retainedClaude = existing.agent_type === 'claude-code' && existing.session_key !== null && !bindingLost
       const wantsDistinct = sessionKey !== null || mode === 'exact' || retainedClaude
       if (wantsDistinct && !sameSession && (live || retainedClaude)) {
         if (mode === 'exact') {
@@ -295,6 +296,7 @@ export class AgentsRepo {
          -- Retained-but-offline rows must not stay offline forever after a
          -- reconnect, and identity is never reassigned to do that.
          offline_since = NULL,
+         binding_lost = 0,
          tmux_pane_id = COALESCE(excluded.tmux_pane_id, tmux_pane_id),
          claude_ui_pid = COALESCE(excluded.claude_ui_pid, claude_ui_pid),
          runtime_ui_pid = COALESCE(excluded.runtime_ui_pid, runtime_ui_pid),

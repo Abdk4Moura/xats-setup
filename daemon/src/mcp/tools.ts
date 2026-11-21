@@ -1094,7 +1094,8 @@ export function registerBusinessTools(
       title: 'Get delivery status',
       description: [
         'Return wake-hint delivery status for a message sent by caller.',
-        'Status describes auto-poke delivery only; mailbox persistence is already complete.',
+        'The statuses field describes legacy auto-poke delivery only; mailbox persistence is already complete.',
+        'Opt-in local_delivery observations distinguish transport-written, host-queued, held, unknown, and other stages; these are not proof of model reading or task completion.',
         'Only the original sender can read a message delivery status.'
       ].join(' '),
       inputSchema: {

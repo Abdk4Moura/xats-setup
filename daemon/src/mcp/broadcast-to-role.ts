@@ -6,6 +6,8 @@ import type { FanoutDeps, AutoPokeSkipReason } from './auto-poke-fanout.js'
 import { runFanoutWithRetry } from './fanout-with-retry.js'
 import { parseDeliveryRow } from '../lib/delivery-spec.js'
 import { recordInitialDeliveryStatuses } from './delivery-status.js'
+import { LocalDeliveryStore } from '../storage/local-delivery.js'
+import { localArrivalHub } from '../daemon/local-arrival.js'
 
 export type BroadcastToRoleDeps = FanoutDeps
 
@@ -81,6 +83,7 @@ export class BroadcastToRoleService {
     const recipients = rows.map(r => r.agent_id)
     const baseId = randomUUID()
     const inserted = this.insert(fromRow.team, input, recipients, baseId)
+    localArrivalHub(this.db).publish()
 
     // Wake file for claude-job recipients
     try {
@@ -147,6 +150,7 @@ export class BroadcastToRoleService {
       for (let i = 0; i < recipients.length; i++) {
         const id = i === 0 ? baseId : `${baseId}-${i}`
         stmt.run(id, event_id, team, team, input.from, recipients[i], input.to_role, input.subject ?? null, input.body, 0, sent_at)
+        if (input.auto_poke !== false) new LocalDeliveryStore(this.db).enqueue({ messageId: baseId, agentId: recipients[i], eventId: event_id })
       }
       return { message_id: baseId, event_id, sent_at }
     })

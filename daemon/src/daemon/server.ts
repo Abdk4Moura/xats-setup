@@ -8,6 +8,7 @@ import { makeAuthHook } from './auth.js'
 import { mountMcp } from '../mcp/transport.js'
 import { mountRestApi } from './rest-api.js'
 import { runCleanup } from './cleanup.js'
+import { LocalDeliveryStore } from '../storage/local-delivery.js'
 import { SseFanout } from './sse-fanout.js'
 import { ChannelWakeFanout } from './channel-wake-fanout.js'
 import { clearAllRetries } from '../mcp/poke-retry.js'
@@ -61,6 +62,9 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     localDevice: opts.localDevice ?? resolveLocalDeviceLabel(),
   }
   applySchema(db, { localDevice: context.localDevice })
+  // Bindings do not survive this process. Mark them reclaimable so a
+  // reconnecting session keeps its own agent_id instead of getting a -2.
+  db.exec('UPDATE agents SET binding_lost = 1 WHERE session_key IS NOT NULL')
   const claudeBind = new ClaudeBindCapabilities(db, context.localDevice)
   const startedAt = Date.now()
   const version = '0.1.0'
@@ -78,6 +82,29 @@ export async function buildServer(opts: ServerOpts): Promise<FastifyInstance> {
     log: opts.mcpLog,
     orphanSessionLimit: orphanGcMaxSessions,
     claudeBind,
+  })
+
+  // Fail-closed recovery after a daemon restart. The MCP session binding lives in
+  // memory, so a reconnecting host may ask to bind its own identity. Requires a
+  // live delivery lease and a binding that the restart actually lost, and refuses
+  // to guess when zero or several sessions are unbound.
+  app.post('/api/local-delivery/rebind', async (req, reply) => {
+    const token = req.headers['x-xats-delivery-token']
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
+      return reply.code(401).send({ error: 'invalid_delivery_lease' })
+    }
+    const lease = new LocalDeliveryStore(db).authenticate(token)
+    if (!lease) return reply.code(401).send({ error: 'invalid_delivery_lease' })
+    const row = db.prepare('SELECT team, binding_lost FROM agents WHERE agent_id=?')
+      .get(lease.agentId) as { team: string; binding_lost: number } | undefined
+    if (!row) return reply.code(404).send({ error: 'unknown_agent' })
+    if (Number(row.binding_lost) !== 1) return reply.code(409).send({ error: 'binding_not_lost' })
+    const outcome = mcp.rebindUniqueUnbound(lease.agentId, row.team)
+    if (!outcome.ok) {
+      return reply.code(409).send({ error: outcome.reason === 'ambiguous' ? 'ambiguous_unbound_sessions' : 'no_unbound_session' })
+    }
+    db.prepare('UPDATE agents SET binding_lost = 0 WHERE agent_id=?').run(lease.agentId)
+    return reply.send({ ok: true, generation: lease.generation })
   })
   // Loopback-only REST lifeboat. Mounted after the auth + origin-classification
   // onRequest hooks (above) and alongside mountMcp. Receives the same

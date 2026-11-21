@@ -5,6 +5,8 @@ import type { AutoPokeSkipReason, FanoutDeps } from './auto-poke-fanout.js'
 import { runFanoutWithRetry } from './fanout-with-retry.js'
 import { parseDeliveryRow } from '../lib/delivery-spec.js'
 import { recordInitialDeliveryStatuses } from './delivery-status.js'
+import { LocalDeliveryStore } from '../storage/local-delivery.js'
+import { localArrivalHub } from '../daemon/local-arrival.js'
 
 export type BroadcastDeps = FanoutDeps
 
@@ -76,7 +78,8 @@ export class BroadcastService {
     if (rows.length === 0) return { error: 'unknown_recipient' }
     const recipients = rows.map(r => r.agent_id)
     const baseId = randomUUID()
-    const inserted = this.insertBroadcast(fromRow.team, input.from, recipients, input.body, input.subject, baseId)
+    const inserted = this.insertBroadcast(fromRow.team, input.from, recipients, input.body, input.subject, baseId, input.auto_poke !== false)
+    localArrivalHub(this.db).publish()
 
     // Wake file for claude-job recipients
     try {
@@ -120,7 +123,7 @@ export class BroadcastService {
   }
 
   private insertBroadcast(team: string, from: string, recipients: string[], body: string,
-                          subject: string | undefined, baseId: string): { message_id: string; event_id: number; sent_at: string } {
+                          subject: string | undefined, baseId: string, notify: boolean): { message_id: string; event_id: number; sent_at: string } {
     const tx = this.db.transaction(() => {
       const event_id = Number(this.db.prepare(
         `INSERT INTO events (from_team, to_team, event_type, actor_agent_id, payload, created_at) VALUES (?,?,?,?,?,?)`
@@ -135,6 +138,7 @@ export class BroadcastService {
       for (let i = 0; i < recipients.length; i++) {
         const id = i === 0 ? baseId : `${baseId}-${i}`
         insert.run(id, event_id, team, team, from, recipients[i], '*broadcast*', subject ?? null, body, 0, sent_at)
+        if (notify) new LocalDeliveryStore(this.db).enqueue({ messageId: baseId, agentId: recipients[i], eventId: event_id })
       }
       return { message_id: baseId, event_id, sent_at }
     })

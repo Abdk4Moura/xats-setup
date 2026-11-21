@@ -53,7 +53,19 @@ export function runCleanup(db: Database.Database, opts: CleanupOpts = {}): { del
         )`
   )
 
+  const hasLocalDelivery = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_delivery_outbox'").get())
   const tx = db.transaction(() => {
+    // Delivery audit data has the same hard TTL as its mailbox. Delete child
+    // observations explicitly so cleanup also works without FK enforcement.
+    if (hasLocalDelivery) {
+      const oldAttempts = `SELECT attempt_id FROM local_delivery_attempts WHERE message_id IN
+        (SELECT message_id FROM local_delivery_outbox WHERE created_at < ?)`
+      const cutoffMs = Date.parse(ageCutoff)
+      db.prepare(`DELETE FROM local_delivery_facts WHERE attempt_id IN (${oldAttempts})`).run(cutoffMs)
+      db.prepare(`DELETE FROM local_delivery_attempts WHERE attempt_id IN (${oldAttempts})`).run(cutoffMs)
+      db.prepare('DELETE FROM local_delivery_outbox WHERE created_at < ?').run(cutoffMs)
+      db.prepare('DELETE FROM local_delivery_leases WHERE expires_at < ?').run(cutoffMs)
+    }
     const s = deleteStatus.run(ageCutoff)
     const m = deleteMessages.run(ageCutoff)
     const e = deleteEvents.run(ageCutoff)
