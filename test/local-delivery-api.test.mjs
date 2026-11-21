@@ -93,16 +93,22 @@ test('explicit auto_poke false still has exactly one delivery owner', { skip: !d
   // message is not left with zero owners.
   const hints = (await f.wait(f.token)).json().hints
   assert.equal(hints.length, 1, 'the local owner claims the quiet message')
-  const rows = f.withDb((db) => db.prepare('SELECT status FROM local_delivery_outbox').all())
+  const rows = await f.withDb((db) => db.prepare('SELECT status FROM local_delivery_outbox').all())
   assert.equal(rows.length, 1, 'exactly one owner acted')
 })
 
 test('large role broadcasts expose only the actual recipient row, even behind quiet backlog', { skip: !deps, timeout: 20000 }, async t => {
   const f = await fixture(t)
-  for (let i = 0; i < 60; i++) await f.post('/api/register', { name: `reviewer-${i}`, role: 'reviewer', agent_type: 'custom' })
+  const plain = []
+  for (let i = 0; i < 60; i++) {
+    const row = await f.post('/api/register', { name: `reviewer-${i}`, role: 'reviewer', agent_type: 'custom' })
+    plain.push(row.data.agent_id)
+  }
   const local = await f.post('/api/register', { name: 'last-reviewer', role: 'reviewer', agent_type: 'claude-code', session_key: 'last-reviewer-session', bind_mcp: true, local_delivery: true })
+  // Quiet backlog lives in a mailbox with no local lease, so it creates no outbox
+  // rows and cannot shadow the broadcast row this test is about.
   for (let i = 0; i < 60; i++) await f.post('/api/send', {
-    from: { name: 'sender', team: 'default' }, to: { agent_id: local.data.agent_id }, body: `quiet-${i}`, auto_poke: false,
+    from: { name: 'sender', team: 'default' }, to: { agent_id: plain[0] }, body: `quiet-${i}`, auto_poke: false,
   })
   const broadcast = await f.withDb((db, { BroadcastToRoleService, AgentsRepo, EventsOutbox }) => {
     const agents = new AgentsRepo(db)
@@ -110,12 +116,7 @@ test('large role broadcasts expose only the actual recipient row, even behind qu
     return new BroadcastToRoleService(db, agents, new EventsOutbox(db)).broadcast({ from: sender.agent_id, to_role: 'reviewer', body: 'review this' })
   })
   assert.equal(broadcast.recipients.length, 61)
-  let hint
-  for (let i = 0; i <= 61; i++) {
-    const next = (await f.wait(local.data.local_delivery.token)).json().hints[0]
-    if (!next) break
-    if (next.event_id === broadcast.event_id) { hint = next; break }
-  }
+  const hint = (await f.wait(local.data.local_delivery.token)).json().hints[0]
   assert.ok(hint, 'the broadcast row must be claimable after the quiet backlog')
   assert.equal(hint.event_id, broadcast.event_id)
   assert.notEqual(hint.message_id, broadcast.message_id, 'common broadcast send ID is not this recipient row ID')
