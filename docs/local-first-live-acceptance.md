@@ -93,7 +93,7 @@ it, and restarts it against the same database.
    earlier observation is the TUI's suggested-prompt placeholder, not inserted
    message text.
 
-## Gaps found (these keep PR #10 in draft)
+## Gaps found in the first run (all four are fixed; see the final runs above)
 
 1. **A host submit refusal is recorded and then delivery still happens.**
    Facts for one attempt were `claimed` -> `refused` (about 300 ms later) ->
@@ -129,7 +129,7 @@ it, and restarts it against the same database.
   the production bus and were deregistered immediately; production is back to
   its prior agent count with no residue.
 
-## What would let PR #10 merge
+## What the first run needed before merge (now satisfied)
 
 Fix items 1 and 2 (single delivery owner, refusal handling), make item 3 recover
 automatically or document the manual reconnect as intended, and decide whether
@@ -268,7 +268,7 @@ invariant is proven by the focused test rather than by a live refusal.
 | 3 | cursor 1 before the restart, event 3 after; pending row `inbox-consumed` with generation 1; one `mcp lazy rebind`; single identity; `binding_lost` 0; no `/mcp` |
 | 4 | aged recipient: message stored, status `skipped` / `queued_unreachable` |
 
-## Rig-by-rig evidence on the shipped code (head `9bea393`, unchanged since)
+## Rig-by-rig evidence at head `9bea393` (historical; superseded by rigPP)
 
 All rigs ran with `XATS_LOCAL_DELIVERY=1` on daemon and client, `XATS_BASE` pinned
 to the rig, and Claude Code in tmux. The only commits after `9bea393` are tests and
