@@ -231,12 +231,11 @@ export class SendMessageService {
       ).run(id, event_id, args.fromTeam, args.toTeam, args.from,
         args.toAgentId,
         null, args.input.subject ?? null, args.input.body, needReply, sent_at)
-      // Exactly one delivery owner per message. A live local lease means this
-      // host owns delivery for that generation, so the row is enqueued whether
-      // or not auto-poke (tmux wake) is enabled. Without a lease the polling /
-      // host path owns it and no outbox row is created, so the two can never
-      // deliver the same message twice.
-      if (args.from !== args.toAgentId &&
+      // Ownership rule: auto_poke:false means "do not wake the recipient", so no
+      // owner is activated and the mailbox is read on the next poll. Otherwise a
+      // live local lease owns delivery; without one, polling owns it. Exactly one
+      // of the two acts for any given message.
+      if (args.input.auto_poke !== false && args.from !== args.toAgentId &&
           new LocalDeliveryStore(this.db).hasLiveLease(args.toAgentId)) {
         new LocalDeliveryStore(this.db).enqueue({ messageId: id, agentId: args.toAgentId, eventId: event_id })
       }

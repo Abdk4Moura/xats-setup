@@ -41,7 +41,7 @@ function setup(t, mods) {
 
 const outbox = (db) => db.prepare('SELECT message_id, status, generation FROM local_delivery_outbox').all();
 
-test('a live lease owns delivery even when auto_poke is disabled', { skip: !Database }, async t => {
+test('a live lease owns delivery when a wake is permitted', { skip: !Database }, async t => {
   const mods = await load(t);
   const { db, agents, service, store, sender } = setup(t, mods);
   const recipient = agents.register({
@@ -52,7 +52,7 @@ test('a live lease owns delivery even when auto_poke is disabled', { skip: !Data
 
   const result = await service.send({
     from: sender.agent_id, to_agent_id: recipient.agent_id,
-    body: 'owner-probe', auto_poke: false,
+    body: 'owner-probe',
   });
   assert.ok(result.recipients, `send must succeed: ${JSON.stringify(result)}`);
   const rows = outbox(db);
@@ -113,4 +113,16 @@ test('a recipient past the reachability window is stored, not refused', { skip: 
     .get(result.message_id);
   assert.deepEqual(status, { wake_status: 'skipped', skip_reason: 'queued_unreachable' });
   assert.equal(outbox(db).length, 0, 'no local owner for an offline recipient');
+});
+
+test('auto_poke:false leaves ownership entirely with polling', { skip: !Database }, async t => {
+  const mods = await load(t);
+  const { db, agents, service, store, sender } = setup(t, mods);
+  const recipient = agents.register({
+    name: 'owner-quiet', team: 'default', agent_type: 'claude-code',
+    session_key: 'sess-quiet', name_mode: 'exact',
+  });
+  store.issueLease({ agentId: recipient.agent_id, sessionKey: 'sess-quiet' });
+  await service.send({ from: sender.agent_id, to_agent_id: recipient.agent_id, body: 'quiet', auto_poke: false });
+  assert.equal(outbox(db).length, 0, 'no wake owner is activated, so the poll path is the only owner');
 });
