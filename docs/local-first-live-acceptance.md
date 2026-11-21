@@ -1,8 +1,9 @@
 # Local-first live acceptance on a real Claude Code host
 
-Status: run on 2026-11-20 against Claude Code 2.1.295 (Opus, Max account) on this
-VPS, in isolated rigs. This is the interactive acceptance PR #10 was waiting for.
-It is a real host and a real model; it is not a stub.
+Status: run on 2026-11-20 and 2026-11-21 on this VPS in isolated rigs, with a real
+host and a real model (not a stub). The installed CLI is **Claude Code 2.1.330**;
+an earlier revision of this file wrongly said 2.1.295. Where a result depended on a
+specific head, the head is named next to it.
 
 ## Rig setup
 
@@ -103,14 +104,11 @@ Four changes address the findings above. Verified by CI on `b14286c`
    in the mailbox and recorded as `skipped` / `queued_unreachable`, with no
    delivered or queued claim.
 
-### Still open: the live rig re-run
+### Superseded: the live rig re-run
 
-Acceptance criteria 1 and 3 require a real model session (a submit attempt and a
-model inbox read). On 2026-11-21 the host CLI reported
-`Failed to authenticate: OAuth session expired and could not be refreshed`, so
-the rig cannot run until the session is re-authenticated with `claude /login`.
-Tasks 3 (rig half) and 5 stay open for that reason; everything that does not need
-a model is done and green.
+This note described the period when the host session had expired
+(`OAuth session expired`). It was later re-authenticated and the rig was re-run;
+see the resolution and final-run sections below. Nothing here is still open.
 
 ## Status after the audit (corrected)
 
