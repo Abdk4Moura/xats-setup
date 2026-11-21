@@ -275,6 +275,7 @@ async function loadAcceptedCursor($) {
       }
       // Migrate the original single-attempt journal without changing version 1.
       if (Number.isSafeInteger(localAttempt?.event_id) && localAttempt.event_id > 0 &&
+          localAttempt.retryable !== true &&
           ["held", "refused", "unknown"].includes(localAttempt.stage)) {
         localOutcomes[localAttempt.event_id] = localAttempt;
       }
@@ -490,8 +491,9 @@ function classifySubmitResult(result) {
   if (stage === "held") return "held";
   if (stage === "refused" || result?.refused === true) return "refused";
   const reason = String(result?.error ?? result?.reason ?? result?.code ?? "");
-  // Busy signals are retryable: the host is mid-turn, so wait for the boundary.
-  if (/busy|in.?progress|mid.?turn|turn|queued|running|not.?idle|interrupt/i.test(reason)) return "held";
+  // Busy signals are retryable, and distinct from a host-held message: the
+  // host is mid-turn, so wait for the boundary instead of settling the attempt.
+  if (/busy|in.?progress|mid.?turn|turn|queued|running|not.?idle|interrupt/i.test(reason)) return "busy";
   // Unclassifiable: record uncertainty instead of inventing a refusal.
   return "unknown";
 }
@@ -591,8 +593,9 @@ async function renewLocal($) {
   }
 }
 
-async function saveLocalAttempt($, hint, stage, accepted = false, { blocking = true } = {}) {
-  localAttempt = { attempt_id: hint.attempt_id, generation: hint.generation, event_id: hint.event_id, stage };
+async function saveLocalAttempt($, hint, stage, accepted = false, { blocking = true, retryable = false } = {}) {
+  localAttempt = { attempt_id: hint.attempt_id, generation: hint.generation, event_id: hint.event_id, stage,
+    ...(retryable ? { retryable: true } : {}) };
   if (blocking && ["held", "refused", "unknown"].includes(stage)) localOutcomes[hint.event_id] = localAttempt;
   else delete localOutcomes[hint.event_id];
   if (accepted) {
@@ -612,7 +615,8 @@ async function saveLocalAttempt($, hint, stage, accepted = false, { blocking = t
 async function processLocalHint($, hint) {
   // A lost ack repeats the same attempt, not the host submission. Persisted
   // unknown is intentional: a crash after a write must not cause blind retry.
-  if (localAttempt?.attempt_id === hint.attempt_id && localAttempt.generation === hint.generation) {
+  if (localAttempt?.attempt_id === hint.attempt_id && localAttempt.generation === hint.generation &&
+      localAttempt.retryable !== true) {
     return localAttempt.stage;
   }
   const base = await baseUrl($);
@@ -660,11 +664,11 @@ async function processLocalHint($, hint) {
     stage = "unknown";
     lastSubmitError = String(error?.message || error || "prompt submit failed");
   }
-  if (stage === "held") {
+  if (stage === "busy") {
     // Busy host: keep the claim, do not acknowledge, and retry at the next turn
-    // boundary. Journaled for visibility but explicitly non-blocking so the
-    // retry is not skipped as an already-settled outcome.
-    await saveLocalAttempt($, hint, "held", false, { blocking: false });
+    // boundary. Journaled as a held stage for visibility but explicitly
+    // non-blocking so the retry is not skipped as an already-settled outcome.
+    await saveLocalAttempt($, hint, "held", false, { blocking: false, retryable: true });
     pending = [];
     lastSubmitError = "host busy; retrying at the next turn boundary";
     const busy = new Error("host_busy");

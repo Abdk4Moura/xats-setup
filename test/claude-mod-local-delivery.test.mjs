@@ -72,10 +72,10 @@ test('hint immediately submits only attributed notice; connected mode stops all 
 
 for (const [label, options, stage] of [
   ['void success', { result: undefined }, 'transport-written'],
-  ['explicit refusal', { result: { ok: false, error: 'busy' } }, 'refused'],
+  ['explicit refusal', { result: { ok: false, stage: 'refused' } }, 'refused'],
   ['held approval', { result: { status: 'held' } }, 'held'],
   ['uncertain exception', { throws: true }, 'unknown'],
-  ['unrecognized busy', { result: { busy: true } }, 'refused'],
+  ['unclassifiable failure', { result: { busy: true } }, 'unknown'],
   ['actual MCP read', { cursor: 7 }, 'inbox-consumed'],
 ]) test(`${label} reports only proven stage and never falls back or resubmits`, async () => {
   const f = fake(options)
@@ -114,7 +114,7 @@ test('accepted cursor and durable attempt survive restart and safely replay the 
 })
 
 for (const stage of ['refused', 'unknown']) test(`${stage} journal prevents restart resubmission`, async () => {
-  const f = fake(stage === 'unknown' ? { throws: true } : { result: { ok: false } })
+  const f = fake(stage === 'unknown' ? { throws: true } : { result: { ok: false, stage: 'refused' } })
   await connect(f)
   await mod.localTick(f.$)
   mod.reset()
@@ -126,7 +126,7 @@ for (const stage of ['refused', 'unknown']) test(`${stage} journal prevents rest
 })
 
 for (const stage of ['refused', 'unknown', 'held']) test(`${stage} cannot resubmit through replacement generation or legacy opt-out`, async () => {
-  const f = fake(stage === 'unknown' ? { throws: true } : { result: stage === 'held' ? { status: 'held' } : { ok: false } })
+  const f = fake(stage === 'unknown' ? { throws: true } : { result: stage === 'held' ? { status: 'held' } : { ok: false, stage: 'refused' } })
   await connect(f)
   await mod.localTick(f.$)
   f.files.set(`${root}.delivery.json`, JSON.stringify({ ...lease, generation: 2 }))
@@ -472,7 +472,8 @@ test('replacement during host submission never sends the old receipt with new cr
   options.generation = 2
   options.hints = [{ ...hint, generation: 2, attempt_id: 'replacement-attempt' }]
   await mod.localTick(f.$)
-  assert.deepEqual(f.acks, [{ attempt_id: 'replacement-attempt', stage: 'refused' }])
+  // An unclassifiable non-ok submit is uncertainty, not an invented refusal.
+  assert.deepEqual(f.acks, [{ attempt_id: 'replacement-attempt', stage: 'unknown' }])
 })
 
 test('session hook schedules background work without waiting for the longpoll', async () => {
@@ -488,10 +489,11 @@ test('session hook schedules background work without waiting for the longpoll', 
 // --- submit-outcome classification (task: busy vs explicit refusal) ---------
 const classify = mod.classifySubmitResult
 
-test('busy host result is a retryable hold, never a refusal', () => {
-  assert.equal(classify({ ok: false, error: 'busy: a turn is already running' }), 'held')
+test('busy host result is retryable, never a refusal', () => {
+  assert.equal(classify({ ok: false, error: 'busy: a turn is already running' }), 'busy')
+  assert.equal(classify({ ok: false, reason: 'turn in progress' }), 'busy')
+  // An explicit host hold is a real hold, not a busy retry.
   assert.equal(classify({ ok: false, status: 'held' }), 'held')
-  assert.equal(classify({ ok: false, reason: 'turn in progress' }), 'held')
 })
 
 test('explicit refusal stays terminal', () => {
@@ -507,4 +509,18 @@ test('unclassifiable failure is unknown, not an invented refusal', () => {
 test('success shapes keep their distinct stages', () => {
   assert.equal(classify({ ok: true }), 'host-queued')
   assert.equal(classify(undefined), 'transport-written')
+})
+
+test('busy submit retries at the next turn boundary and then succeeds', async () => {
+  const f = fake({ result: { ok: false, error: 'busy: turn in progress' } })
+  await connect(f)
+  await mod.localTick(f.$)
+  assert.equal(f.submits.length, 1, 'one host submit attempt')
+  assert.equal(f.acks.length, 0, 'a busy host must not be acknowledged as settled')
+  assert.equal(mod.state().localAttempt?.stage, 'held', 'journaled as held for visibility')
+  // Host becomes free: the same claim is retried rather than replayed as settled.
+  f.$.prompt.submit = async (value) => { f.submits.push(value); return { ok: true } }
+  await mod.localTick(f.$)
+  assert.equal(f.submits.length, 2)
+  assert.deepEqual(f.acks[0], { attempt_id: hint.attempt_id, stage: 'host-queued' })
 })
