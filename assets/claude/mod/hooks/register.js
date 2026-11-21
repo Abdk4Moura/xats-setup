@@ -580,6 +580,25 @@ function leaseMayHaveChanged(error) {
   return [401, 403, 409, 410].includes(error?.status);
 }
 
+/**
+ * Ask the daemon to re-attach this identity to the live host session after a
+ * restart dropped the in-memory binding. Fail-closed: the daemon refuses unless
+ * exactly one session is unbound and this lease owns the identity.
+ */
+async function rebindLocal($) {
+  if (!localLease) return false;
+  try {
+    await localRequest($, "rebind", {});
+    localError = "";
+    return true;
+  } catch (error) {
+    localError = error?.status === 409
+      ? "rebind refused; another session may own this identity"
+      : "rebind failed; will retry";
+    return false;
+  }
+}
+
 async function renewLocal($) {
   if (!localOwned) return;
   try {
@@ -587,7 +606,8 @@ async function renewLocal($) {
     else await refreshLocalLease($);
     localError = "";
   } catch (error) {
-    if (leaseMayHaveChanged(error)) {
+    if (leaseMayHaveChanged(error) || error?.status === 404) {
+      if (await rebindLocal($)) return;
       try { await refreshLocalLease($); localError = ""; return; } catch { /* retain ownership */ }
     }
     localError = "lease renewal failed; no polling fallback";

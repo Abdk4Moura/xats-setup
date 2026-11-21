@@ -440,5 +440,22 @@ export function mountMcp(
     }
   }
 
-  return { reapOrphanSessions, sessionMetrics }
+  // Fail-closed rebind for a reconnecting host. Binds only when exactly one
+  // session is unbound; zero or several is refused rather than guessed, so a
+  // session can never claim an identity that might belong to another host.
+  function rebindUniqueUnbound(agentId: string, team: string):
+    { ok: true } | { ok: false; reason: 'none' | 'ambiguous' } {
+    const unbound = [...sessions.values()].filter(
+      (session) => !session.capabilityBoundAgentId && !sessionOwners.has(session.sessionId),
+    )
+    if (unbound.length === 0) return { ok: false, reason: 'none' }
+    if (unbound.length > 1) return { ok: false, reason: 'ambiguous' }
+    const session = unbound[0]
+    session.capabilityBoundAgentId = agentId
+    session.bindAgent(agentId, team)
+    log(`mcp rebind: sid=${session.sessionId} agent=${agentId}`)
+    return { ok: true }
+  }
+
+  return { reapOrphanSessions, sessionMetrics, rebindUniqueUnbound }
 }
