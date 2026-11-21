@@ -1,0 +1,1 @@
+Real-model acceptance run (pinned Claude Code 2.1.295). The inference backend is the real paid model; no stub. Helpers: hold-wait.mjs occupies the delivery wait slot for C3, rig-guard.mjs is the UserPromptSubmit hook that induces a real host refusal for C1.

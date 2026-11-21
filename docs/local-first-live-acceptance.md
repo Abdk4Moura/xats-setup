@@ -1,14 +1,38 @@
 # Local-first live acceptance on a real Claude Code host
 
 Status: run on 2026-11-20 and 2026-11-21 on this VPS in isolated rigs. The final
-run (**rigOO**, below) pinned **Claude Code 2.1.295**, the version the criterion
-names, and its artifacts are committed under `docs/acceptance/rigOO/`. Earlier
-runs used the then-installed 2.1.330 and a real model; rigOO uses a local
-Anthropic-shaped stub model so the run needs no account or quota. In every run
-the host binary, the plugin, the daemon, the MCP transport and the mailbox are
-real. Where a result depended on a specific head, the head is named next to it.
+run (**rigPP**, below) used the **real model** with **Claude Code 2.1.295**, the
+version the criterion names, and its artifacts are committed under
+`docs/acceptance/rigPP/`. A second run (**rigOO**) repeats all four criteria with
+a local Anthropic-shaped stub model, so the same behaviour is shown without an
+account or quota; its artifacts are under `docs/acceptance/rigOO/`. Earlier runs
+used the then-installed 2.1.330. In every run the host binary, the plugin, the
+daemon, the MCP transport and the mailbox are real. Where a result depended on a
+specific head, the head is named next to it.
 
-## Final acceptance run (rigOO)
+## Final acceptance run (rigPP, real model)
+
+One isolated rig, **real model**, pinned host **2.1.295**,
+`XATS_LOCAL_DELIVERY=1` on daemon and client, `XATS_BASE` pinned to the rig, no
+production writes. The full bundle is committed at
+[`docs/acceptance/rigPP/`](acceptance/rigPP/README.md): the driver, the daemon
+log, the pane capture, and the outbox, attempt, fact, cursor, lease and message
+tables.
+
+| Criterion | Evidence from this run |
+|---|---|
+| 1. no refused-then-consumed | Event 2 was refused by the **real host**: the `UserPromptSubmit` hook exited 2, `prompt.submit` resolved `{drop}`, the plugin classified it `refused`. Outbox stayed `refused`/generation 1, facts `claimed, refused`. The model then read the inbox through event 7 (cursor 7), which covers event 2, and the attempt still read `refused` with facts unchanged. |
+| 2. one owner for `auto_poke:false` | Event 4: `poked:false`; exactly **1** attempt; facts `claimed` -> `host-queued` -> `inbox-consumed`, generation 1; the polling path never ran while the local owner was active; cursor advanced to 7. |
+| 3. restart resumes without `/mcp` | Event 7: at kill `claimed`/generation 1; after restart released to `stored`/null; then `host-queued`/generation 1 and `inbox-consumed`/generation 1; cursor advanced; exactly one `mcp lazy rebind`; no `/mcp` in the pane. |
+| 4. aged recipient stored | Send to a recipient last seen 300 s ago returned `queued_unreachable: true, unreachable_seconds: 300`; the body `PP-C4-reply-payload` was retrievable from the mailbox. |
+
+`host-queued` is the line that was missing before: the real host resolves
+`prompt.submit` to `PromptSubmitResult` (`{text}` on entry, `{drop}` on refusal)
+with no `ok` field, so every successful submit used to be recorded `unknown`.
+`f17af7a` reads the real shapes, and `test/claude-mod-local-delivery.test.mjs`
+now pins them.
+
+## Stub-model confirmation (rigOO)
 
 One isolated rig, pinned host **2.1.295**, `XATS_LOCAL_DELIVERY=1` on daemon and
 client, `XATS_BASE` pinned to the rig, no production writes. The full bundle is
