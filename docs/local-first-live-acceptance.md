@@ -80,3 +80,34 @@ Evidence kept in this directory: `daemon.log`, `data.db` (rig 1),
 Fix items 1 and 2 (single delivery owner, refusal handling), make item 3 recover
 automatically or document the manual reconnect as intended, and decide whether
 item 4 should queue instead of failing.
+
+## Fixes landed (branch `feat/local-first-delivery`)
+
+Four changes address the findings above. Verified by CI on `b14286c`
+(10/10 jobs) and by focused tests:
+
+1. **Single owner.** `send-message.ts` enqueues a local delivery row only when a
+   wake is permitted (`auto_poke !== false`) *and* the recipient holds a live
+   local lease. With `auto_poke:false` no owner is activated and the poll path is
+   the only one; without a lease the poll path owns it. `test/local-delivery-owner.test.mjs`
+   asserts both directions, plus expired-lease and self-send.
+2. **Honest submit outcomes.** `classifySubmitResult` separates `busy`
+   (journaled as held, unacknowledged, retried with bounded backoff at the next
+   turn boundary) from an explicit `refused` (terminal, and a refused journal is
+   never converted to inbox-consumed, including across restart and replacement
+   generation). Unclassifiable failures are `unknown`, not an invented refusal.
+3. **Re-arm after restart.** A failed wait or lease renewal no longer surrenders
+   ownership: the owner keeps retrying with bounded backoff, refreshes the lease
+   from disk, and never falls back to polling. Covered by the restart test.
+4. **Queued unreachable.** A send to a recipient past the 180 s window is stored
+   in the mailbox and recorded as `skipped` / `queued_unreachable`, with no
+   delivered or queued claim.
+
+### Still open: the live rig re-run
+
+Acceptance criteria 1 and 3 require a real model session (a submit attempt and a
+model inbox read). On 2026-11-21 the host CLI reported
+`Failed to authenticate: OAuth session expired and could not be refreshed`, so
+the rig cannot run until the session is re-authenticated with `claude /login`.
+Tasks 3 (rig half) and 5 stay open for that reason; everything that does not need
+a model is done and green.
