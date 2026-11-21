@@ -592,15 +592,17 @@ async function rebindLocal($) {
     localError = "";
     return true;
   } catch (error) {
-    localError = error?.status === 409
-      ? "rebind refused; another session may own this identity"
-      : "rebind failed; will retry";
+    // 409 binding_not_lost is the normal steady state, not a failure.
+    if (error?.status !== 409) localError = "rebind failed; will retry";
     return false;
   }
 }
 
 async function renewLocal($) {
   if (!localOwned) return;
+  // Cheap idempotent recovery: if a restart dropped this session's MCP binding,
+  // the daemon re-attaches the identity here, before the model ever needs to ask.
+  if (localLease) await rebindLocal($);
   try {
     if (localLease) await validateLocalLease($, localLease);
     else await refreshLocalLease($);
