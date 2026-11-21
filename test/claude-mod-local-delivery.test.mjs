@@ -543,3 +543,18 @@ test('re-arms after a daemon restart without surrendering ownership to polling',
   assert.deepEqual(f.acks[0], { attempt_id: hint.attempt_id, stage: 'host-queued' })
   assert.equal(f.submits.length, 1, 'exactly one host submission after recovery')
 })
+
+test('a refused journal is never rewritten as inbox-consumed by a later read', async () => {
+  const f = fake({ result: { ok: false, stage: 'refused' } })
+  await connect(f)
+  await mod.localTick(f.$)
+  assert.equal(f.acks[0].stage, 'refused')
+  // The person (or the model) later reads the mailbox, advancing the cursor.
+  f.files.set(`${root}.cursor.json`, JSON.stringify({ version: 1, agent_id: lease.agent_id, event_id: 7,
+    local_delivery: { ...hint, stage: 'refused' } }))
+  mod.reset()
+  const restarted = fake({ files: f.files, cursor: 7 })
+  await connect(restarted)
+  await mod.localTick(restarted.$)
+  assert.equal(restarted.acks[0].stage, 'refused', 'a host refusal stays a refusal')
+})

@@ -86,10 +86,15 @@ test('local delivery lease replacement fences stale waiters and acknowledgements
   assert.notEqual(stale.status, 200)
 })
 
-test('explicit auto_poke false does not create a local delivery hint', { skip: !deps, timeout: 20000 }, async t => {
+test('explicit auto_poke false still has exactly one delivery owner', { skip: !deps, timeout: 20000 }, async t => {
   const f = await fixture(t)
   assert.equal((await f.send('quiet message', false)).status, 200)
-  assert.deepEqual((await f.wait(f.token)).json().hints, [])
+  // A live lease owns delivery even when the tmux wake is suppressed, so the
+  // message is not left with zero owners.
+  const hints = (await f.wait(f.token)).json().hints
+  assert.equal(hints.length, 1, 'the local owner claims the quiet message')
+  const rows = f.withDb((db) => db.prepare('SELECT status FROM local_delivery_outbox').all())
+  assert.equal(rows.length, 1, 'exactly one owner acted')
 })
 
 test('large role broadcasts expose only the actual recipient row, even behind quiet backlog', { skip: !deps, timeout: 20000 }, async t => {
@@ -105,8 +110,13 @@ test('large role broadcasts expose only the actual recipient row, even behind qu
     return new BroadcastToRoleService(db, agents, new EventsOutbox(db)).broadcast({ from: sender.agent_id, to_role: 'reviewer', body: 'review this' })
   })
   assert.equal(broadcast.recipients.length, 61)
-  const response = await f.wait(local.data.local_delivery.token)
-  const hint = response.json().hints[0]
+  let hint
+  for (let i = 0; i <= 61; i++) {
+    const next = (await f.wait(local.data.local_delivery.token)).json().hints[0]
+    if (!next) break
+    if (next.event_id === broadcast.event_id) { hint = next; break }
+  }
+  assert.ok(hint, 'the broadcast row must be claimable after the quiet backlog')
   assert.equal(hint.event_id, broadcast.event_id)
   assert.notEqual(hint.message_id, broadcast.message_id, 'common broadcast send ID is not this recipient row ID')
   const preview = await f.app.inject(`/api/inbox?team=default&name=last-reviewer&since_event_id=${hint.event_id - 1}`)

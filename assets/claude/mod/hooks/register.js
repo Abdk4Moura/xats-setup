@@ -327,8 +327,9 @@ async function readMailboxCursor($, base) {
     for (const id of Object.keys(localOutcomes)) {
       if (Number(id) <= cursor) { delete localOutcomes[id]; pruned = true; }
     }
-    if (localAttempt && ["held", "refused", "unknown"].includes(localAttempt.stage) &&
-        localAttempt.event_id <= cursor) {
+    // Only uncertainty may be resolved by a real read. A refusal or an explicit
+    // hold is a host decision and must never be rewritten as consumption.
+    if (localAttempt && localAttempt.stage === "unknown" && localAttempt.event_id <= cursor) {
       localAttempt = { ...localAttempt, stage: "inbox-consumed" };
       pruned = true;
     }

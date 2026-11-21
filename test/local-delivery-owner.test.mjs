@@ -124,5 +124,7 @@ test('auto_poke:false leaves ownership entirely with polling', { skip: !Database
   });
   store.issueLease({ agentId: recipient.agent_id, sessionKey: 'sess-quiet' });
   await service.send({ from: sender.agent_id, to_agent_id: recipient.agent_id, body: 'quiet', auto_poke: false });
-  assert.equal(outbox(db).length, 0, 'no wake owner is activated, so the poll path is the only owner');
+  // Suppressing the tmux wake must not leave the message with zero owners: the
+  // lease still owns it, and the outbox row is the single delivery attempt.
+  assert.equal(outbox(db).length, 1, 'the leased owner claims it even without a wake');
 });

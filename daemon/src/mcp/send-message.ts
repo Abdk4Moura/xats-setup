@@ -154,7 +154,8 @@ export class SendMessageService {
       delivery: parseDeliveryRow(rcpt),
     }
 
-    const baseResult = this.insert({ fromTeam, toTeam, from: input.from, toAgentId: rcpt.agent_id, input })
+    const localOwner = new LocalDeliveryStore(this.db).hasLiveLease(rcpt.agent_id)
+    const baseResult = this.insert({ fromTeam, toTeam, from: input.from, toAgentId: rcpt.agent_id, input, localOwner })
     // Wake only after the message and intent transaction commits.
     localArrivalHub(this.db).publish()
 
@@ -180,7 +181,7 @@ export class SendMessageService {
     }
 
     const autoPokeEnabled = input.auto_poke !== false
-    if (!autoPokeEnabled) {
+    if (!autoPokeEnabled && !localOwner) {
       recordInitialDeliveryStatuses(this.db, {
         messageId: baseResult.message_id,
         recipients: [rcpt.agent_id],
@@ -210,7 +211,7 @@ export class SendMessageService {
   }
 
   private insert(args: {
-    fromTeam: string; toTeam: string; from: string; toAgentId: string; input: SendInput
+    fromTeam: string; toTeam: string; from: string; toAgentId: string; input: SendInput; localOwner: boolean
   }): { message_id: string; event_id: number; recipients: string[]; sent_at: string } {
     const tx = this.db.transaction(() => {
       const needReply = args.input.need_reply !== false ? 1 : 0
@@ -231,12 +232,10 @@ export class SendMessageService {
       ).run(id, event_id, args.fromTeam, args.toTeam, args.from,
         args.toAgentId,
         null, args.input.subject ?? null, args.input.body, needReply, sent_at)
-      // Ownership rule: auto_poke:false means "do not wake the recipient", so no
-      // owner is activated and the mailbox is read on the next poll. Otherwise a
-      // live local lease owns delivery; without one, polling owns it. Exactly one
-      // of the two acts for any given message.
-      if (args.input.auto_poke !== false && args.from !== args.toAgentId &&
-          new LocalDeliveryStore(this.db).hasLiveLease(args.toAgentId)) {
+      // Exactly one owner: a live local lease owns delivery for this generation,
+      // whether or not auto-poke (a tmux wake) is enabled. Without a lease the
+      // polling path owns it and no outbox row exists, so both can never act.
+      if (args.from !== args.toAgentId && args.localOwner) {
         new LocalDeliveryStore(this.db).enqueue({ messageId: id, agentId: args.toAgentId, eventId: event_id })
       }
       return { message_id: id, event_id, sent_at }

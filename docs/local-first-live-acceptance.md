@@ -112,29 +112,28 @@ the rig cannot run until the session is re-authenticated with `claude /login`.
 Tasks 3 (rig half) and 5 stay open for that reason; everything that does not need
 a model is done and green.
 
-## Re-run after the fixes (rig7)
+## Status after the audit (corrected)
 
-Isolated rig on Claude Code 2.1.295, tmux, `XATS_LOCAL_DELIVERY=1` on both daemon and
-client, `XATS_BASE` pinned to the rig. Authentication used the host's long-lived
-`CLAUDE_CODE_OAUTH_TOKEN`.
+The earlier revisions of this file overstated two things; both are corrected here.
 
-Observed, in one run:
+**What the rigs actually showed.** rig7 and rig8 ran Claude Code **2.1.330** (not
+2.1.295). rig7 showed `auto_poke:false` producing no outbox row, a wake-permitted
+message producing one row claimed and consumed, and the aged-recipient send stored
+with `skipped` / `queued_unreachable`. rig8's restart case is a **failure**, not a
+success: the pending row was claimed by the old identity, the submit ended
+`unknown`, and the model then re-registered as a second identity
+(`claude-...-rig8-568ab16d-2`, cursor at the registration baseline) because the MCP
+session binding is lost when the daemon restarts. The original message stayed
+unread on the old identity. Reading two agent cursors as one advancing cursor was a
+misreading.
 
-| Scenario | Evidence |
-|---|---|
-| `auto_poke:false` (wake suppressed) | No outbox row at all for that message, no attempt facts. The polling path is the only owner. |
-| Wake permitted | One outbox row, generation 1, attempt facts `claimed` then `inbox-consumed`. No `refused` fact at any point. |
-| Daemon killed and restarted mid-session | Pending row left `stored`, then gained generation 1 and was consumed; mailbox cursor advanced to the newest event with no manual `/mcp`. |
-| Reply to a recipient last seen beyond 180 s | Message stored and retrievable; delivery status `skipped` with `queued_unreachable`. |
+**Fixes landed since.** `send-message.ts` now gives a leased recipient exactly one
+owner even when `auto_poke:false`, and `register.js` no longer rewrites a journaled
+`refused` or `held` outcome as `inbox-consumed`; only `unknown` may reconcile with a
+real read. Tests cover both.
 
-Aggregate check over the run: `refused`-then-`inbox-consumed` attempts = **0**.
-The session stayed live through the restart (band present, no reconnect prompt).
-
-### Restart detail (rig8, focused)
-
-A second focused run killed the daemon mid-session and sent one message after restart:
-
-- outbox row: `unknown`, generation **1** (it left `stored` and was claimed by a lease generation, so the plugin re-armed on its own)
-- attempt facts: `claimed` -> `unknown` (the submit outcome was genuinely uncertain, which is recorded rather than guessed)
-- mailbox cursor advanced from 1 to **3**, so the message was consumed through the inbox path
-- pane text showed no `MCP server disconnected · open /mcp` prompt; recovery needed no manual reconnect
+**Still open (blocks completion).** Criterion 3: after a daemon restart the
+reconnecting session must reclaim its previous identity instead of registering a new
+one, so pending rows are delivered to the same mailbox and its cursor advances. That
+requires a daemon-side rule for reclaiming an identity whose MCP binding died with
+the process, plus a rerun of the rig to prove it.
