@@ -216,6 +216,34 @@ test('isolated durable local delivery store', { skip: !sqliteDir && 'better-sqli
     } finally { db.close() }
   })
 
+  await t.test('a refused delivery is never reconciled as consumed by a later read', () => {
+    const { db, store } = fixture()
+    try {
+      const a = lease(store)
+      enqueue(store, 'refused-message', 1)
+      const [refused] = store.claim(a.token, { now: 10002 })
+      assert.equal(ack(store, a.token, refused, 'refused'), true)
+      assert.equal(store.listForMessage('refused-message')[0].status, 'refused')
+      // The person reads the mailbox by other means: the refusal must survive.
+      assert.equal(store.consumeThrough('a', 1, 10003), 0)
+      assert.equal(store.listForMessage('refused-message')[0].status, 'refused')
+      const facts = db.prepare('SELECT stage FROM local_delivery_facts WHERE attempt_id=?').all(refused.attempt_id).map(r => r.stage)
+      assert.deepEqual(facts.sort(), ['claimed', 'refused'])
+    } finally { db.close() }
+  })
+
+  await t.test('a held delivery is never reconciled as consumed by a later read', () => {
+    const { db, store } = fixture()
+    try {
+      const a = lease(store)
+      enqueue(store, 'held-message', 1)
+      const [held] = store.claim(a.token, { now: 10002 })
+      assert.equal(ack(store, a.token, held, 'held'), true)
+      assert.equal(store.consumeThrough('a', 1, 10003), 0)
+      assert.equal(store.listForMessage('held-message')[0].status, 'held')
+    } finally { db.close() }
+  })
+
   await t.test('schema reinitialization never consumes an unread zero mailbox cursor', () => {
     const { db } = fixture()
     try {

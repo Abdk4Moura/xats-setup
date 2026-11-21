@@ -259,8 +259,11 @@ export class LocalDeliveryStore {
   consumeThrough(agentId: string, eventId: number, now = Date.now()): number {
     time(now)
     return this.db.transaction(() => {
+      // Only an UNRESOLVED delivery can be reconciled by a read. A refusal, a
+      // hold, an expiry or a failure is the host's decision and must keep its
+      // stage even when the person later reads the mailbox by other means.
       const rows = this.db.prepare(`SELECT attempt_id FROM local_delivery_outbox
-        WHERE agent_id=? AND event_id<=? AND status NOT IN ('inbox-consumed','model-turn-started','replied')`)
+        WHERE agent_id=? AND event_id<=? AND status IN ('stored','claimed','transport-written','unknown')`)
         .all(agentId, eventId) as Array<{ attempt_id: string | null }>
       for (const row of rows) if (row.attempt_id) {
         this.db.prepare('INSERT OR IGNORE INTO local_delivery_facts(attempt_id,stage,observed_at) VALUES (?, ?, ?)')
@@ -269,7 +272,7 @@ export class LocalDeliveryStore {
           .run(now, row.attempt_id)
       }
       return this.db.prepare(`UPDATE local_delivery_outbox SET status='inbox-consumed', updated_at=?
-        WHERE agent_id=? AND event_id<=? AND status NOT IN ('inbox-consumed','model-turn-started','replied')`)
+        WHERE agent_id=? AND event_id<=? AND status IN ('stored','claimed','transport-written','unknown')`)
         .run(now, agentId, eventId).changes
     })()
   }
