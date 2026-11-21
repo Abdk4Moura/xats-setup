@@ -559,3 +559,20 @@ test('a refused journal is never rewritten as inbox-consumed by a later read', a
   await mod.localTick(restarted.$)
   assert.equal(restarted.acks[0].stage, 'refused', 'a host refusal stays a refusal')
 })
+
+test('a refused event stays refused when the cursor advanced and a new generation reclaims it', async () => {
+  const f = fake({ result: { ok: false, stage: 'refused' } })
+  await connect(f)
+  await mod.localTick(f.$)
+  assert.equal(f.acks[0].stage, 'refused')
+  // A real inbox read advances the cursor, then a replacement generation claims
+  // the same event. The refusal must not be rewritten as consumption.
+  f.files.set(`${root}.delivery.json`, JSON.stringify({ ...lease, generation: 2 }))
+  mod.reset()
+  const replacement = fake({ files: f.files, generation: 2, cursor: 7,
+    hints: [{ ...hint, attempt_id: 'replacement-refused', generation: 2 }] })
+  await connect(replacement)
+  await mod.localTick(replacement.$)
+  assert.equal(replacement.acks[0].stage, 'refused', 'a host refusal is terminal')
+  assert.equal(replacement.submits.length, 0, 'no delivery attempt for a refused event')
+})

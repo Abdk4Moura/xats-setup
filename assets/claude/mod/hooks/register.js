@@ -325,6 +325,10 @@ async function readMailboxCursor($, base) {
     // forget. A later accepted notice alone does not resolve an older refusal.
     let pruned = false;
     for (const id of Object.keys(localOutcomes)) {
+      // A refusal or hold is the host's decision, not an uncertainty: advancing
+      // the cursor must not erase it, or a later generation would rewrite it.
+      const stage = localOutcomes[id]?.stage;
+      if (stage === "refused" || stage === "held") continue;
       if (Number(id) <= cursor) { delete localOutcomes[id]; pruned = true; }
     }
     // Only uncertainty may be resolved by a real read. A refusal or an explicit
@@ -622,15 +626,21 @@ async function processLocalHint($, hint) {
   }
   const base = await baseUrl($);
   const cursor = await readMailboxCursor($, base);
+  const priorStage = localOutcomes[hint.event_id]?.stage;
+  // A host refusal or hold is a decision, not an uncertainty: neither a real read
+  // nor a replacement generation may rewrite it as consumption.
+  if (priorStage === "refused" || priorStage === "held") {
+    await saveLocalAttempt($, hint, priorStage);
+    return priorStage;
+  }
+  // An uncertain attempt IS resolved by a real read that advanced the cursor.
   if (cursor !== null && cursor >= hint.event_id) {
     await saveLocalAttempt($, hint, "inbox-consumed");
     return "inbox-consumed";
   }
-  if (localOutcomes[hint.event_id]) {
-    // Replacement attempts and generations do not undo prior host outcomes.
-    const stage = localOutcomes[hint.event_id].stage;
-    await saveLocalAttempt($, hint, stage);
-    return stage;
+  if (priorStage) {
+    await saveLocalAttempt($, hint, priorStage);
+    return priorStage;
   }
   if (hint.event_id <= acceptedEventId) {
     await saveLocalAttempt($, hint, "transport-written");
