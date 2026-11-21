@@ -261,3 +261,24 @@ rigs the same band reappears after recovery without any `/mcp` prompt:
 Where the model could not submit (the host rejects `prompt.submit` after a restart on
 this build), the pane shows the model reading the inbox itself, and the row is
 reconciled to `inbox-consumed` only after that read.
+
+## The two restart shapes (rigS, pinned Claude Code 2.1.295)
+
+The rig ran on the exact version named by the acceptance criterion, because the
+installed CLI had since auto-updated to 2.1.330. Two distinct cases matter:
+
+1. **Row `stored` when the daemon dies** (the case the criterion describes). rigR
+   captured `stored` / generation null at the kill; after the restart the row was
+   still there and the session's real inbox read consumed it with the cursor moving
+   3 -> 5. `test/local-delivery-restart.test.mjs` proves the full chain
+   deterministically: `stored` + null generation at kill, claim with a lease
+   generation after restart, ack `host-queued`, real read, `inbox-consumed`, cursor
+   advanced.
+
+2. **Row already `claimed` when the daemon dies** (in flight). rigS sent and killed
+   within the claim window: status `claimed` at the kill, then `unknown` after the
+   restart, and the plugin did not re-claim it for that same lease generation. That
+   is deliberate: `claimed` means a hint may already have been handed to a host, and
+   the store refuses to re-deliver an uncertain attempt under an unchanged
+   generation. It is resolved by a later real read (through `consumeThrough`), not by
+   a blind retry. This is a documented limit, not the criterion's scenario.
