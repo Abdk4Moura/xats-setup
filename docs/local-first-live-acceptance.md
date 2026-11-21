@@ -129,3 +129,12 @@ Observed, in one run:
 
 Aggregate check over the run: `refused`-then-`inbox-consumed` attempts = **0**.
 The session stayed live through the restart (band present, no reconnect prompt).
+
+### Restart detail (rig8, focused)
+
+A second focused run killed the daemon mid-session and sent one message after restart:
+
+- outbox row: `unknown`, generation **1** (it left `stored` and was claimed by a lease generation, so the plugin re-armed on its own)
+- attempt facts: `claimed` -> `unknown` (the submit outcome was genuinely uncertain, which is recorded rather than guessed)
+- mailbox cursor advanced from 1 to **3**, so the message was consumed through the inbox path
+- pane text showed no `MCP server disconnected · open /mcp` prompt; recovery needed no manual reconnect
