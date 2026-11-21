@@ -25,6 +25,7 @@ rig-local, and `XATS_BASE` is pinned to the rig.
 | `driver.sh` | The exact rig script that produced this run. |
 | `daemon.log` | Daemon log; shows the restart and the lazy rebind. |
 | `pane.txt` | Final tmux pane capture. |
+| `pane-pending.txt` | The transient band captured while a notice was still pending. |
 | `timeline.txt` | C3 outbox transitions after the restart. |
 | `outbox.tsv` | `message_id`, `status`, `generation`, `attempt_id`. |
 | `attempts.tsv` | One row per attempt. |

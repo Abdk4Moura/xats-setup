@@ -30,6 +30,7 @@ credential is committed.
 | `driver.sh` | The exact rig script that produced this run. |
 | `daemon.log` | Daemon log; shows the restart and the lazy rebind. |
 | `pane.txt` | Final tmux pane capture. |
+| `pane-pending.txt` | The transient band captured while a notice was still pending. |
 | `timeline.txt` | Criterion-3 outbox transitions after the restart. |
 | `outbox.tsv` | `message_id`, `status`, `generation`, `attempt_id`. |
 | `attempts.tsv` | One row per attempt. |
