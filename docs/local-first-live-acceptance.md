@@ -219,3 +219,23 @@ invariant is proven by the focused test rather than by a live refusal.
 | 2 | `auto_poke:false`: one outbox row, `inbox-consumed`, generation 1; polling returns early while the local owner is active |
 | 3 | cursor 1 before the restart, event 3 after; pending row `inbox-consumed` with generation 1; one `mcp lazy rebind`; single identity; `binding_lost` 0; no `/mcp` |
 | 4 | aged recipient: message stored, status `skipped` / `queued_unreachable` |
+
+## Rig-by-rig evidence on the shipped code (head `9bea393`, unchanged since)
+
+All rigs ran with `XATS_LOCAL_DELIVERY=1` on daemon and client, `XATS_BASE` pinned
+to the rig, and Claude Code in tmux. The only commits after `9bea393` are tests and
+this document.
+
+| Criterion | Live evidence | Deterministic proof |
+|---|---|---|
+| 1. no refused-then-consumed | rigL/rigO injected a real refusal through the daemon's own ack path (`stage=refused`): outbox and attempt stayed `refused`, facts `claimed, refused`, and a later real inbox read did not change it. Aggregate `refused_then_consumed = 0`. | `local-delivery-store.test.mjs`: "a refused delivery is never reconciled as consumed by a later read", "a held delivery is never reconciled as consumed"; `claude-mod-local-delivery.test.mjs`: "a refused event stays refused when the cursor advanced and a new generation reclaims it" |
+| 2. one owner for `auto_poke:false` | rigN: quiet send produced exactly one outbox row, `inbox-consumed`, generation 1, exactly 1 attempt, cursor advanced; polling returns early while the local owner is active. | `local-delivery-owner.test.mjs`, `local-delivery-api.test.mjs` "explicit auto_poke false still has exactly one delivery owner" |
+| 3. restart resumes without `/mcp` | rigM: row `claimed`/generation 1 before the kill, `inbox-consumed`/generation 1 after the restart, one `mcp lazy rebind`, single identity, `binding_lost` 0, no `/mcp`. rigL separately captured a row `stored`/generation null at the moment of the kill. | `local-delivery-restart.test.mjs`: real daemon, `SIGKILL`, restart, then assert `stored`+null generation at kill, claim with a generation, ack `host-queued`, real inbox read, `inbox-consumed`, cursor advanced |
+| 4. aged recipient stored | rigL/rigO/rigN: message row stored, status `skipped`/`queued_unreachable`, body retrievable | `local-delivery-owner.test.mjs` "a recipient past the reachability window is stored, not refused" |
+
+Limitation stated plainly: no single live run captured a row that was `stored` at
+the kill *and* then claimed with a generation, because the plugin claims within
+about a second and my process-pause attempts did not reliably stop it. rigL caught
+the `stored` moment with an expired lease; rigM/rigO caught claimed → generation →
+consumed. The two halves are each observed live, and `local-delivery-restart.test.mjs`
+covers the combined case deterministically against a real daemon process.
