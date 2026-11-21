@@ -132,11 +132,8 @@ owner even when `auto_poke:false`, and `register.js` no longer rewrites a journa
 `refused` or `held` outcome as `inbox-consumed`; only `unknown` may reconcile with a
 real read. Tests cover both.
 
-**Still open (blocks completion).** Criterion 3: after a daemon restart the
-reconnecting session must reclaim its previous identity instead of registering a new
-one, so pending rows are delivered to the same mailbox and its cursor advances. That
-requires a daemon-side rule for reclaiming an identity whose MCP binding died with
-the process, plus a rerun of the rig to prove it.
+**Resolved since that note.** Identity reclaim plus a call-time binding rule fixed
+the restart case; see the resolution section below.
 
 ### rig9: identity reclaim works, delivery still blocked
 
@@ -156,3 +153,32 @@ the turn. Criterion 3 therefore needs an explicit rebinding design: either the
 transport re-binds a session to an existing identity by a durable session key, or
 the plugin re-establishes the binding without a model turn. Both change the
 identity surface and need a decision before more code.
+
+## Resolution (rigH)
+
+Two changes fixed the restart case, and one wrong guess was removed:
+
+- The daemon marks every identity that had an MCP binding as `binding_lost` when it
+  starts, and a reconnecting session reclaims that same row by name instead of being
+  suffixed into `-2`.
+- The binding is established **at tool-call time, on the session that is actually
+  calling**, and only when exactly one identity lost its binding. Binding a
+  background session from a REST call was the earlier bug: the client replaced that
+  session and the binding landed on a dead one.
+
+rigH, one run, head `0a5e2bf` (the only later commit changed tests):
+
+| Check | Result |
+|---|---|
+| `auto_poke:false` | outbox row exists, `inbox-consumed`, generation 1. The leased owner acts; polling does not also deliver. |
+| normal send | `inbox-consumed`, generation 1 |
+| daemon killed and restarted mid-session | same identity (`binding_lost` 0, no `-2`), one `mcp lazy rebind` log line, pending row `inbox-consumed` with generation 1, cursor advanced to the new event (5) |
+| aged recipient (>180 s) | stored, status `skipped` / `queued_unreachable` |
+| refused-then-consumed attempts | 0 |
+
+Honest limits of that run: the host still rejects the plugin's own submit after a
+restart (the attempt journal shows `unknown`), so the pending mail reached the model
+through a normal inbox read in a user turn, not through the plugin's submit. No
+`/mcp` reconnect was needed, and the row reconciled to `inbox-consumed` once the
+message was genuinely read. This is a real resume of delivery to the same mailbox,
+but it is not evidence of working post-restart prompt submission.
