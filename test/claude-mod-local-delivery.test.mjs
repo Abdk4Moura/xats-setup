@@ -504,6 +504,7 @@ test('explicit refusal stays terminal', () => {
 test('unclassifiable failure is unknown, not an invented refusal', () => {
   assert.equal(classify({ ok: false }), 'unknown')
   assert.equal(classify({ ok: false, error: 'socket closed' }), 'unknown')
+  assert.equal(classify({ ok: false, stage: 'refused' }), 'refused')
 })
 
 test('success shapes keep their distinct stages', () => {
