@@ -144,6 +144,23 @@ test('explicit native receipt observations preserve original identity without au
   assert.equal((await f.post('/api/local-delivery/ack', { attempt_id: expiring.attempt_id, stage: 'expired' }, token)).status, 200)
 })
 
+test('a non-Claude harness can own local delivery with only a session key', { skip: !deps, timeout: 20000 }, async t => {
+  const f = await fixture(t)
+  const missingKey = await f.post('/api/register', { name: 'pi-no-key', team: 'default',
+    agent_type: 'custom', agent_type_name: 'pi', local_delivery: true })
+  assert.equal(missingKey.status, 400)
+  assert.equal(missingKey.data.error, 'local_delivery_requires_session_key')
+  const pi = await f.post('/api/register', { name: 'pi-lease', team: 'default', agent_type: 'custom',
+    agent_type_name: 'pi', session_key: 'pi-session-1', local_delivery: true })
+  assert.equal(pi.status, 200)
+  assert.ok(pi.data.local_delivery?.token, 'a lease token is issued')
+  assert.equal(pi.data.bind_token, undefined, 'MCP bind tokens stay Claude-only')
+  const wait = await f.app.inject({ method: 'GET', url: '/api/local-delivery/wait?timeout_ms=0',
+    headers: { 'x-xats-delivery-token': pi.data.local_delivery.token } })
+  assert.equal(wait.statusCode, 200)
+  assert.equal(Number(wait.json().generation), Number(pi.data.local_delivery.generation))
+})
+
 test('local adapter wakes from a commit, remains scoped, and prevents legacy poke', { skip: !deps, timeout: 20000 }, async t => {
   const f = await fixture(t)
   const pending = f.wait(f.token, 10000)

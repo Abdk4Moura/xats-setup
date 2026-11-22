@@ -228,8 +228,15 @@ async function handleRegister(ctx: RestCtx, req: FastifyRequest, reply: FastifyR
     })
   }
   const data = parsed.data
-  if (data.local_delivery && (!data.bind_mcp || data.delivery !== undefined)) {
+  // Local delivery is a lease over one mailbox, not a Claude feature: any
+  // harness with a session key may own it and block on /wait instead of
+  // polling. The MCP bind token stays Claude-only.
+  const piLease = Boolean(data.local_delivery) && !data.bind_mcp
+  if (data.local_delivery && data.delivery !== undefined) {
     return reply.code(400).send({ error: 'local_delivery_requires_claude_hook' })
+  }
+  if (data.local_delivery && !data.bind_mcp && !data.session_key) {
+    return reply.code(400).send({ error: 'local_delivery_requires_session_key' })
   }
   if (data.bind_mcp && (data.agent_type !== 'claude-code' || !data.session_key || !ctx.claudeBind)) {
     return reply.code(400).send({ error: 'claude_bind_requires_session_key' })
@@ -281,6 +288,11 @@ async function handleRegister(ctx: RestCtx, req: FastifyRequest, reply: FastifyR
       })
     }
     throw error
+  }
+  if (piLease) {
+    const lease = new LocalDeliveryStore(ctx.db).issueLease({ agentId: result.agent_id, sessionKey: data.session_key! })
+    localArrivalHub(ctx.db).publish()
+    return reply.send({ ...result, local_delivery: lease })
   }
   if (data.bind_mcp) {
     const { token: bind_token, code: bind_code } = ctx.claudeBind!.issue(result.agent_id, data.session_key!)
