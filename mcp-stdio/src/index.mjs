@@ -25,6 +25,7 @@ import {
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { pinnedCall } from './identity.mjs'
+import { tmuxBinding } from './pane.mjs'
 
 const VERSION = '0.1.0'
 const DEFAULT_PORT = 9100
@@ -78,10 +79,20 @@ async function main() {
 
   if (capabilities.tools) {
     server.setRequestHandler(ListToolsRequestSchema, async () => client.listTools())
-    server.setRequestHandler(CallToolRequestSchema, async (request) =>
-      client.callTool({ name: request.params.name,
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const result = await client.callTool({ name: request.params.name,
         arguments: pinnedCall(request.params.name, request.params.arguments, PINNED_NAME,
-          request.params._meta, PINNED_TEAM) }))
+          request.params._meta, PINNED_TEAM) })
+      // A stdio host has no hook to bind its pane, so do it here: without a
+      // pane the daemon cannot wake this session and every send shows poked:false.
+      if (request.params.name === 'register_agent') {
+        const binding = tmuxBinding()
+        if (binding) {
+          await client.callTool({ name: 'bind_runtime_identity', arguments: binding }).catch(() => {})
+        }
+      }
+      return result
+    })
   }
 
   if (capabilities.resources) {
