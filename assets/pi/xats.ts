@@ -68,8 +68,6 @@ let lease: { token: string; generation: number; expiresAt: number } | null = nul
 let leaseRejected = false;
 let delivering = false;
 let deliveryStopped = false;
-let streamAbort: AbortController | undefined;
-let streamUnsupported = false;
 let deliveredEvent = 0;
 
 async function request(path: string, init?: RequestInit) {
@@ -272,56 +270,6 @@ export default function (pi: ExtensionAPI) {
     for (const m of messages) lastEventId = Math.max(lastEventId, Number(m.event_id) || 0);
   }
 
-  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-  // True push: one held connection, hints written as they commit. Falls back to
-  // the lease long-poll, then to polling, only on explicit unsupported answers.
-  async function eventStreamLoop(): Promise<void> {
-    delivering = true;
-    while (!deliveryStopped) {
-      if (!agentId || !(await ensureLease())) { await sleep(1500); continue; }
-      const abort = new AbortController();
-      streamAbort = abort;
-      try {
-        const response = await fetch(`${baseUrl}/api/local-delivery/events`, {
-          headers: { ...leaseHeaders(), Accept: "text/event-stream" }, signal: abort.signal,
-        });
-        if (response.status === 404 || response.status === 501) {
-          streamUnsupported = true;
-          delivering = false;
-          void deliveryLoop();
-          return;
-        }
-        if (response.status === 401 || response.status === 409) { lease = null; continue; }
-        if (!response.ok || !response.body) throw new Error(`stream ${response.status}`);
-        const reader = response.body.getReader();
-        let buffer = "";
-        let event = "";
-        while (!deliveryStopped) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += Buffer.from(value).toString("utf8");
-          let index: number;
-          while ((index = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, index).replace(/\r$/, "");
-            buffer = buffer.slice(index + 1);
-            if (line.startsWith("event: ")) event = line.slice(7).trim();
-            else if (line.startsWith("data: ") && event === "hint") {
-              try { await handleHint(JSON.parse(line.slice(6))); } catch { /* one bad hint never kills the stream */ }
-              event = "";
-            } else if (line === "") event = "";
-          }
-        }
-      } catch { /* connection lost: reconnect below */ }
-      finally {
-        abort.abort();
-        if (streamAbort === abort) streamAbort = undefined;
-      }
-      if (!deliveryStopped) await sleep(1000);
-    }
-    delivering = false;
-  }
-
   async function deliveryLoop(): Promise<void> {
     delivering = true;
     while (!deliveryStopped) {
@@ -454,8 +402,7 @@ export default function (pi: ExtensionAPI) {
           cursorSeeded = true;
         } catch { /* seed on the next loop iteration */ }
       }
-      if (streamUnsupported) void deliveryLoop();
-      else void eventStreamLoop();
+      void deliveryLoop();
     }
     else startPoll();
     ctx.ui.setStatus("xats", ctx.ui.theme.fg("muted", id ? `xats: ${name}` : "xats: daemon unavailable"));
@@ -463,7 +410,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     deliveryStopped = true;
-    streamAbort?.abort();
     delivered = null;
     lease = null;
     if (heartbeatTimer) clearInterval(heartbeatTimer);

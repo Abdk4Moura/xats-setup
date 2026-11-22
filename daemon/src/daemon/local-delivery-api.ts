@@ -55,55 +55,6 @@ export function mountLocalDeliveryApi(app: FastifyInstance, db: Database.Databas
     return reply.send({ ok: true })
   })
 
-  // One held connection per delivery owner: a true push instead of a client
-  // long-poll. Hints only, never bodies or stages; the lease and its acks still
-  // decide ownership, so a lost stream can never lose or duplicate mail.
-  const streams = new Map<string, { close: () => void }>()
-  app.get('/api/local-delivery/events', async (req, reply) => {
-    const auth = authenticated(req, reply)
-    if (!auth) return
-    const key = `${auth.lease.agentId}:${auth.lease.generation}`
-    streams.get(key)?.close()
-    const abort = new AbortController()
-    let closed = false
-    const close = () => { if (!closed) { closed = true; abort.abort() } }
-    reply.raw.once('close', close)
-    streams.set(key, { close })
-    reply.raw.writeHead(200, {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-    })
-    reply.raw.write(': connected\n\n')
-    try {
-      while (!closing && !closed) {
-        const lease = store.authenticate(auth.token)
-        if (!lease) { reply.raw.write('event: lease_invalid\ndata: {}\n\n'); break }
-        const hints = store.claim(auth.token)
-        for (const hint of hints) {
-          const mailbox = db.prepare('SELECT id FROM messages WHERE event_id=? AND to_agent_id=? LIMIT 1')
-            .get(hint.event_id, lease.agentId) as { id: string } | undefined
-          reply.raw.write(`event: hint\ndata: ${JSON.stringify({
-            message_id: mailbox?.id ?? hint.message_id, event_id: hint.event_id,
-            attempt_id: hint.attempt_id, generation: hint.generation,
-          })}\n\n`)
-        }
-        if (hints.length) {
-          // An unacknowledged claim replays the same attempt. Emit it once, then
-          // yield: busy-looping here would starve the daemon's event loop.
-          await hub.wait(hub.version(), 1000, abort.signal)
-          continue
-        }
-        await hub.wait(hub.version(), 15000, abort.signal)
-        if (!closed) reply.raw.write(': ping\n\n')
-      }
-    } finally {
-      if (streams.get(key)?.close === close) streams.delete(key)
-      reply.raw.removeListener('close', close)
-      try { reply.raw.end() } catch { /* already gone */ }
-    }
-  })
-
   app.get('/api/local-delivery/wait', async (req, reply) => {
     const auth = authenticated(req, reply)
     if (!auth) return

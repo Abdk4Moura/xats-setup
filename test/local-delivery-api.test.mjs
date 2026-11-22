@@ -7,7 +7,6 @@ import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { buildSync } from 'esbuild'
 import { spawn } from 'node:child_process'
-import net from 'node:net'
 import { __internals as mod } from '../assets/claude/mod/hooks/register.js'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -160,50 +159,6 @@ test('a non-Claude harness can own local delivery with only a session key', { sk
     headers: { 'x-xats-delivery-token': pi.data.local_delivery.token } })
   assert.equal(wait.statusCode, 200)
   assert.equal(Number(wait.json().generation), Number(pi.data.local_delivery.generation))
-})
-
-test('a held SSE stream pushes each delivery hint without a client poll', { skip: !deps, timeout: 30000 }, async t => {
-  // Spawn a real daemon: a held SSE connection cannot be exercised through
-  // inject without pinning the event loop.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-sse-'))
-  const port = await new Promise((resolve, reject) => {
-    const server = net.createServer()
-    server.on('error', reject)
-    server.listen(0, '127.0.0.1', () => { const p = server.address().port; server.close(() => resolve(p)) })
-  })
-  const proc = spawn(process.execPath, [path.join(root, 'daemon/dist/cli.js'), 'daemon', '--host', '127.0.0.1',
-    '--port', String(port), '--db', path.join(dir, 'data.db'), '--pid-file', path.join(dir, 'daemon.pid')],
-    { env: { ...process.env, CROSS_AGENT_TEAMS_MCP_HOME: dir }, stdio: 'ignore' })
-  t.after(() => { proc.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
-  const base = `http://127.0.0.1:${port}`
-  for (let i = 0; i < 100; i += 1) {
-    try { if ((await fetch(`${base}/health`)).ok) break } catch { /* not up */ }
-    await new Promise(r => setTimeout(r, 100))
-  }
-  const post = async (url, body) => (await fetch(`${base}${url}`, { method: 'POST',
-    headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json()
-  const lease = await post('/api/register', { name: 'probe', team: 'default', agent_type: 'custom',
-    agent_type_name: 'probe', session_key: 'projection-1', local_delivery: true })
-  await post('/api/register', { name: 'sender', team: 'default', agent_type: 'custom' })
-  const abort = new AbortController()
-  const response = await fetch(`${base}/api/local-delivery/events`,
-    { headers: { 'x-xats-delivery-token': lease.local_delivery.token }, signal: abort.signal })
-  assert.equal(response.status, 200)
-  assert.match(String(response.headers.get('content-type')), /text\/event-stream/)
-  const sent = await post('/api/send', { from: { team: 'default', name: 'sender' },
-    to: { agent_id: lease.agent_id }, body: 'pushed hint', auto_poke: false })
-  const reader = response.body.getReader()
-  let buffered = ''
-  const deadline = Date.now() + 10000
-  while (Date.now() < deadline && !buffered.includes('event: hint')) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buffered += Buffer.from(value).toString('utf8')
-  }
-  abort.abort()
-  await reader.cancel().catch(() => {})
-  assert.match(buffered, /event: hint/)
-  assert.match(buffered, new RegExp(sent.message_id))
 })
 
 test('local adapter wakes from a commit, remains scoped, and prevents legacy poke', { skip: !deps, timeout: 20000 }, async t => {
