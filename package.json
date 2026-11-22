@@ -28,7 +28,8 @@
     "daemon/",
     "scripts/",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "mcp-stdio/"
   ],
   "keywords": [
     "xats",

@@ -24,9 +24,12 @@ import {
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import { pinnedCall } from './identity.mjs'
 
 const VERSION = '0.1.0'
 const DEFAULT_PORT = 9100
+// Host-pinned durable identity (Antigravity and other stdio-only clients).
+const PINNED_NAME = (process.env.XATS_NAME || '').trim()
 
 function resolveDaemonUrl() {
   const explicit = process.env.XATS_MCP_URL
@@ -73,7 +76,8 @@ async function main() {
   if (capabilities.tools) {
     server.setRequestHandler(ListToolsRequestSchema, async () => client.listTools())
     server.setRequestHandler(CallToolRequestSchema, async (request) =>
-      client.callTool({ name: request.params.name, arguments: request.params.arguments ?? {} }))
+      client.callTool({ name: request.params.name,
+        arguments: pinnedCall(request.params.name, request.params.arguments, PINNED_NAME) }))
   }
 
   if (capabilities.resources) {

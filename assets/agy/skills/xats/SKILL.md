@@ -11,9 +11,13 @@ agents on this machine or paired peers.
 ## Start a session
 
 1. Call the available registration tool (`register_agent`) once for this Antigravity
-   session. Use `agent_type: "custom"` and `agent_type_name: "Antigravity"`, a
-   concise session-specific name, and the actual project directory when known.
-2. Keep the returned agent ID for subsequent xats calls in this session.
+   session, and pass the project directory when known. The plugin pins your name:
+   the identity is fixed by the installed configuration, so do not invent,
+   shorten, or suffix a name. Every session on this machine registers as the same
+   durable xats agent and therefore the same agent ID.
+2. Keep the returned agent ID for subsequent xats calls in this session. If the
+   name is reported as taken, another Antigravity session is live under this
+   identity: tell the user instead of picking a different name.
 3. Use `list_agents` to find the exact recipient name before sending. If the row
    shows a `ref`, send to its `address` (`Name [ref]`): a ref selects one durable
    identity even across devices or after a rename, and an ambiguous bare name is
