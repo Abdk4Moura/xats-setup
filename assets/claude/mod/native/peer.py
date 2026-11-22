@@ -237,9 +237,9 @@ class Bridge:
         if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o022:
             raise ValueError('native_socket_directory_unverified')
         # Native policy receipts require direct siblings of the owner's inbox.
-        # The private host directory and helper-bound filename stem scope these
-        # endpoints without inventing native registry entries.
-        self.sockets = self.owner_socket.parent / f'xats-{self.owner_pid}-{os.getpid()}'
+        # The filename is bound to the owner session and mailbox, never to this
+        # helper's PID, so a helper restart keeps every listed address valid.
+        self.sockets = self.owner_socket.parent
         self.agent = args.agent_id
         self.bus = Bus(args.base)
         self.journal = Journal(self.root / 'journal.db')
@@ -256,7 +256,17 @@ class Bridge:
         if agent_id in self.endpoints:
             return self.endpoints[agent_id][1]
         # One real process, separate endpoints per durable xats mailbox.
-        path = self.sockets.with_name(self.sockets.name + '-' + agent_id.replace('-', '').lower()[:12] + '.sock')
+        path = self.sockets / f'xats-{self.owner_pid}-{agent_id.replace("-", "").lower()[:12]}.sock'
+        # A previous helper for this same session may have left its endpoint.
+        # Only a socket we own is replaced; anything else is refused.
+        try:
+            prior = path.lstat()
+        except FileNotFoundError:
+            prior = None
+        if prior is not None:
+            if not stat.S_ISSOCK(prior.st_mode) or prior.st_uid != os.getuid():
+                raise ValueError('native_endpoint_conflict')
+            path.unlink()
         if len(os.fsencode(path)) > 103:
             raise ValueError('native_socket_path_too_long')
         listener = socket.socket(socket.AF_UNIX)
@@ -441,7 +451,8 @@ class Bridge:
 
     def run(self):
         self.refresh()
-        self.emit(dict(kind='ready', state_dir=str(self.root), socket_root=str(self.sockets), pid=os.getpid()))
+        self.emit(dict(kind='ready', state_dir=str(self.root), socket_dir=str(self.sockets),
+                       owner_pid=self.owner_pid, pid=os.getpid()))
         next_refresh = time.monotonic() + 5
         next_alive = time.monotonic() + 1
         while (self.running and not (self.root / f'stop-{os.getpid()}').exists()

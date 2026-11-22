@@ -178,7 +178,9 @@ class JournalTests(unittest.TestCase):
                 endpoint = bridge.endpoint(self.target)
                 self.assertEqual(endpoint.parent, owner_path.parent,
                     'native policy callbacks do not accept nested socket directories')
-                self.assertTrue(endpoint.name.endswith(self.target.replace('-', '')[:12] + '.sock'))
+                expected = f'xats-{os.getpid()}-{self.target.replace("-", "")[:12]}.sock'
+                self.assertEqual(endpoint.name, expected,
+                    'the address must survive a helper restart, so it cannot carry the helper pid')
                 self.assertEqual(endpoint.stat().st_mode & 0o777, 0o600)
                 owner.close()
                 owner_path.unlink()

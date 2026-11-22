@@ -35,10 +35,14 @@ function peerLabel(peer) {
   return `xats:${cleanLine(peer.name)}${peer.ref ? ` [${cleanLine(peer.ref)}]` : ""}`;
 }
 
+function nativeAddress(peer, state) {
+  return `uds:${state.socketDir}/xats-${state.ownerPid}-${peer.agent_id.replace(/-/g, "").toLowerCase().slice(0, 12)}.sock`;
+}
+
 function validPeer(peer, state) {
   return peer && UUID.test(peer.agent_id) && typeof peer.name === "string" &&
-    typeof peer.address === "string" &&
-    peer.address === `uds:${state.socketRoot}-${peer.agent_id.replace(/-/g, "").toLowerCase().slice(0, 12)}.sock` &&
+    typeof peer.address === "string" && Boolean(state.socketDir && state.ownerPid) &&
+    peer.address === nativeAddress(peer, state) &&
     !peer.address.includes("..") &&
     !/[\x00-\x1f]/.test(peer.address);
 }
@@ -82,10 +86,15 @@ async function runBridge($, state, request) {
           }
           const parent = state.ownerSocket.slice(0, state.ownerSocket.lastIndexOf("/"));
           const ownerPid = state.ownerSocket.slice(state.ownerSocket.lastIndexOf("/") + 1, -5);
-          const expectedSockets = `${parent}/xats-${ownerPid}-${value.pid}`;
-          if (value.socket_root !== expectedSockets) throw new Error("invalid native socket namespace");
+          // The helper PID is deliberately not part of the address: a helper
+          // restart must not invalidate an address a peer already listed, and
+          // the native host only runs a safety check on real uds paths.
+          if (value.socket_dir !== parent || String(value.owner_pid) !== ownerPid) {
+            throw new Error("invalid native socket namespace");
+          }
           state.pid = value.pid;
-          state.socketRoot = expectedSockets;
+          state.socketDir = parent;
+          state.ownerPid = ownerPid;
           if (state.closed) {
             await $.fs.write(`${state.root}/stop-${state.pid}`, "stop\n");
             continue;
@@ -144,7 +153,7 @@ export async function connectNativeBridge($, { cursorPath, agentId, base, rearm 
     }
   } catch { error = "native receipt capability unavailable"; return wasSelected; }
   if (bridge) await stopNativeBridge($);
-  const state = { agentId, cursorPath, root: `${home}/.xats/native/${session}`, ownerSocket: socket, socketRoot: "", pid: null,
+  const state = { agentId, cursorPath, root: `${home}/.xats/native/${session}`, ownerSocket: socket, socketDir: "", ownerPid: null, pid: null,
     ready: false, everReady: wasSelected, closed: false, peers: [], rawPeers: [],
     requests: new Map(), latest: new Map(), receipts: [], resolve: () => {} };
   bridge = state;
@@ -215,7 +224,7 @@ export async function nativeSubmit($, hint, message, text) {
 function listing(state) {
   if (!state?.ready || !state.peers.length) return "";
   return "xats peers (native IPC, non-Claude):\n" + state.peers.map(peer =>
-    `- ${peerLabel(peer)} (${cleanLine(peer.agent_type)})\n  SendMessage to: xats:${peer.agent_id}\n  Native address: ${peer.address}`
+    `- ${peerLabel(peer)} (${cleanLine(peer.agent_type)})\n  SendMessage to: ${peer.address}\n  Stable alias: xats:${peer.agent_id}`
   ).join("\n");
 }
 
@@ -227,7 +236,7 @@ export async function listNativePeers($, e, next) {
   return { ...original, result: { ...original.result,
     listing: `${original.result.listing}\n\n${text}`,
     sections: [...(original.result.sections || []), { kind: "xats", total: bridge.peers.length,
-      rows: bridge.peers.map(peer => ({ name: peerLabel(peer), id: `xats:${peer.agent_id}`,
+      rows: bridge.peers.map(peer => ({ name: peerLabel(peer), id: peer.address,
         type: cleanLine(peer.agent_type), status: "online" })) }],
   } };
 }

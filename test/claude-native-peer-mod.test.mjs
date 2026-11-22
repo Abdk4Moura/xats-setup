@@ -7,9 +7,10 @@ const agent = '11111111-1111-4111-8111-111111111111'
 const attempt = '22222222-2222-4222-8222-222222222222'
 const message = '33333333-3333-4333-8333-333333333333'
 const root = '/home/test/.xats/native/owned-session'
-const peer = { agent_id: agent, name: 'pi-worker', ref: '1234', agent_type: 'pi', address: `uds:${root}/peers-${agent.replace(/-/g, '').slice(0, 12)}.sock` }
+const socketDir = '/tmp/cc-socks'
+const peer = { agent_id: agent, name: 'pi-worker', ref: '1234', agent_type: 'pi', address: `uds:${socketDir}/xats-999-${agent.replace(/-/g, '').slice(0, 12)}.sock` }
 function state(options = {}) {
-  return { ready: true, everReady: true, closed: false, root, socketRoot: root + '/peers', pid: 321, peers: [peer], rawPeers: [],
+  return { ready: true, everReady: true, closed: false, root, socketDir, ownerPid: '999', pid: 321, peers: [peer], rawPeers: [],
     requests: new Map(), latest: new Map(), receipts: [], ...options }
 }
 
@@ -22,7 +23,10 @@ test('native ListAgents preserves core rows and adds explicitly attributed xats 
   assert.match(result.result.listing, /Claude: reviewer/)
   assert.match(result.result.listing, /xats peers \(native IPC, non-Claude\)/)
   assert.match(result.result.listing, /xats:pi-worker \[1234\]/)
-  assert.match(result.result.listing, new RegExp(`SendMessage to: xats:${agent}`))
+  // Native uds first: that is the address form the host's own safety check
+  // understands. The xats: alias stays as a re-resolving convenience.
+  assert.ok(result.result.listing.includes(`SendMessage to: ${peer.address}`))
+  assert.ok(result.result.listing.includes(`Stable alias: xats:${agent}`))
   assert.equal(result.result.sections[0], original.result.sections[0])
   assert.equal(result.result.sections[1].rows[0].type, 'pi')
   assert.equal(original.result.sections.length, 1, 'core result must not be mutated')
@@ -189,6 +193,6 @@ test('native peer discovery rejects endpoints outside the owning helper namespac
   const s = state()
   internals.setState(s)
   internals.receive(s, { kind: 'peers', peers: [peer, { ...peer, address: 'uds:/tmp/arbitrary.sock' },
-    { ...peer, address: `uds:${root}/peers/abc/999.sock` }] })
+    { ...peer, address: `uds:${socketDir}/xats-999-${message.replace(/-/g, '').slice(0, 12)}.sock` }] })
   assert.deepEqual(s.peers, [peer])
 })
