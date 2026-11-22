@@ -1,0 +1,4 @@
+# Transient band captured from the live pane while a notice was pending.
+# Source: tmux pipe-pane stream of the rig session (rigPP).
+✦ xats · 1 notice pending · 1 needs reply
+✦ xats · 1 notice pending · 1 needs reply

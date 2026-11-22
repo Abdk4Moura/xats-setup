@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
 import type { AutoPokeSkipReason } from './auto-poke-fanout.js'
+import { LocalDeliveryStore, type LocalDeliveryRow } from '../storage/local-delivery.js'
 
 export type WakeStatus = 'delivered' | 'retrying' | 'skipped' | 'failed'
 export type DeliverySkipReason =
@@ -7,6 +8,9 @@ export type DeliverySkipReason =
   | 'auto_poke_disabled'
   | 'recipient_active'
   | 'retry_exhausted'
+  // Stored durably, but the recipient was past the reachability window, so no
+  // wake was attempted. The mailbox owns the message; nothing claims delivery.
+  | 'queued_unreachable'
 
 export interface DeliveryStatusRow {
   agent_id: string
@@ -23,7 +27,7 @@ export function recordInitialDeliveryStatuses(
     messageId: string
     recipients: string[]
     delivered: Set<string>
-    skipped: Array<{ agent_id: string; reason: AutoPokeSkipReason }>
+    skipped: Array<{ agent_id: string; reason: DeliverySkipReason }>
     autoPokeDisabled?: boolean
   }
 ): void {
@@ -96,7 +100,7 @@ export class GetDeliveryStatusService {
   constructor(private db: Database.Database) {}
 
   get(args: { caller: string; message_id: string }):
-    | { message_id: string; statuses: DeliveryStatusRow[] }
+    | { message_id: string; statuses: DeliveryStatusRow[]; local_delivery?: LocalDeliveryRow[] }
     | { error: 'unknown_message' } {
     const owned = this.db.prepare(
       `SELECT 1 AS ok FROM messages WHERE id=? AND from_agent_id=? LIMIT 1`
@@ -109,6 +113,9 @@ export class GetDeliveryStatusService {
        WHERE message_id=?
        ORDER BY agent_id ASC`
     ).all(args.message_id) as DeliveryStatusRow[]
-    return { message_id: args.message_id, statuses: rows }
+    const store = new LocalDeliveryStore(this.db)
+    store.expireLeases()
+    const local = store.listForMessage(args.message_id).filter(row => row.selected === 1)
+    return { message_id: args.message_id, statuses: rows, ...(local.length ? { local_delivery: local } : {}) }
   }
 }

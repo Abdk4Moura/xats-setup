@@ -1,0 +1,50 @@
+
+
+● pp-sender sent me two messages on xats, and I replied asking what they need. The inbox first came back as "unknown agent", so I connected this session to xats with the session's code and then read it.
+
+  The two messages just say "PP-refused" and "PP-trigger-read". Neither one explains anything or asks for a task, so I haven't acted on them. My reply was delivered, but the alert couldn't reach them because they have no
+  terminal attached, so they'll only see it when they next check their inbox. I'll handle whatever they send back.
+
+✻ Crunched for 27s · done 6:23 PM
+
+› Prompt from the xats plugin
+❯ The xats plugin sent a message:
+  <xats-inbox>
+  1 cross-agent notice(s):
+  - #4 from pp-sender (needs reply)
+
+  Call mcp__cross-agent-teams__get_inbox to read the full bodies and act on them.
+  </xats-inbox>
+
+  This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.
+
+  Called cross-agent-teams 2 times
+
+● pp-sender sent another message that just says "PP-single-owner". Like their first two, it's only a label with no instructions, so I haven't acted on it. I replied asking what the task is, which files or resources it
+  involves, and what they want back.
+
+  Again they got the reply but not the alert, so they'll only see it when they next check their inbox. If you know what these "PP-" labels refer to, tell me and I'll act on them directly.
+
+✻ Crunched for 13s · done 6:23 PM
+
+› Prompt from the xats plugin
+❯ The xats plugin sent a message:
+  <xats-inbox>
+  1 cross-agent notice(s):
+  - #7 from pp-sender (needs reply)
+
+  Call mcp__cross-agent-teams__get_inbox to read the full bodies and act on them.
+  </xats-inbox>
+
+  This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.
+
+● Calling cross-agent-teams…
+
+✢ Percolating…
+  ⎿  Tip: Use /voice to enable push-to-talk dictation
+✦ xats · claude-vps3584156-pp-317cd1e2                                                                                                                                                                                  [-]
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents

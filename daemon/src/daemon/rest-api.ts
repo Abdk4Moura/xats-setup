@@ -14,6 +14,9 @@ import type { ChannelWakeFanout } from './channel-wake-fanout.js'
 import type { SessionOriginInfo } from './network-origin.js'
 import type { DaemonContext } from './server.js'
 import type { ClaudeBindCapabilities } from '../mcp/claude-bind.js'
+import { LocalDeliveryStore } from '../storage/local-delivery.js'
+import { localArrivalHub } from './local-arrival.js'
+import { mountLocalDeliveryApi } from './local-delivery-api.js'
 
 // Loopback-only, sessionless REST lifeboat. It reuses the SAME service layer as
 // the MCP tools (SendMessageService / GetInboxService / listAgentsForTeam) and
@@ -190,6 +193,7 @@ const registerBodySchema = z.object({
   name_mode: z.enum(['prefer', 'exact']).optional(),
   session_key: z.string().min(1).optional(),
   bind_mcp: z.boolean().optional(),
+  local_delivery: z.boolean().optional(),
   delivery: z.unknown().optional(),
 }).strict()
 
@@ -224,6 +228,9 @@ async function handleRegister(ctx: RestCtx, req: FastifyRequest, reply: FastifyR
     })
   }
   const data = parsed.data
+  if (data.local_delivery && (!data.bind_mcp || data.delivery !== undefined)) {
+    return reply.code(400).send({ error: 'local_delivery_requires_claude_hook' })
+  }
   if (data.bind_mcp && (data.agent_type !== 'claude-code' || !data.session_key || !ctx.claudeBind)) {
     return reply.code(400).send({ error: 'claude_bind_requires_session_key' })
   }
@@ -277,7 +284,12 @@ async function handleRegister(ctx: RestCtx, req: FastifyRequest, reply: FastifyR
   }
   if (data.bind_mcp) {
     const { token: bind_token, code: bind_code } = ctx.claudeBind!.issue(result.agent_id, data.session_key!)
-    return reply.send({ ...result, bind_token, bind_code })
+    const store = new LocalDeliveryStore(ctx.db)
+    if (!data.local_delivery) store.revokeAgent(result.agent_id)
+    const local_delivery = data.local_delivery
+      ? store.issueLease({ agentId: result.agent_id, sessionKey: data.session_key! }) : undefined
+    localArrivalHub(ctx.db).publish()
+    return reply.send({ ...result, bind_token, bind_code, ...(local_delivery ? { local_delivery } : {}) })
   }
   return reply.send(result)
 }
@@ -296,11 +308,15 @@ async function handleDeregister(ctx: RestCtx, req: FastifyRequest, reply: Fastif
     const marked = ctx.agents.markClaudeSessionOffline(data.agent_id, data.session_key)
     if (!marked) return reply.code(404).send({ error: 'unknown_agent' })
     ctx.claudeBind?.revoke(data.agent_id)
+    new LocalDeliveryStore(ctx.db).revokeAgent(data.agent_id)
+    localArrivalHub(ctx.db).publish()
     return reply.send({ ok: true })
   }
   const deleted = ctx.agents.deleteById(data.agent_id)
   if (!deleted) return reply.code(404).send({ error: 'unknown_agent' })
   ctx.claudeBind?.revoke(data.agent_id)
+  new LocalDeliveryStore(ctx.db).revokeAgent(data.agent_id)
+  localArrivalHub(ctx.db).publish()
   return reply.send({ ok: true })
 }
 
@@ -366,6 +382,7 @@ export function mountRestApi(
   // is token (401) then loopback (403); a remote caller with a correct token still
   // gets 403 and no data-layer action runs (short-circuit in the gate).
   app.addHook('onRequest', restLoopbackGate)
+  mountLocalDeliveryApi(app, db)
   app.post('/api/send', (req, reply) => handleSend(ctx, req, reply))
   app.get('/api/inbox', (req, reply) => handleInbox(ctx, req, reply))
   app.get('/api/cursor', (req, reply) => handleCursor(ctx, req, reply))

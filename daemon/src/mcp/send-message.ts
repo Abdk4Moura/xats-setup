@@ -7,7 +7,8 @@ import { parseDeliveryRow, type DeliverySpec } from '../lib/delivery-spec.js'
 import { runFanoutWithRetry } from './fanout-with-retry.js'
 import { recordInitialDeliveryStatuses } from './delivery-status.js'
 import { resolveAgentAddress, type AddressCandidate } from '../storage/agent-ref.js'
-
+import { LocalDeliveryStore } from '../storage/local-delivery.js'
+import { localArrivalHub } from '../daemon/local-arrival.js'
 export type { AutoPokeFn, AutoPokeSkipReason } from './auto-poke-fanout.js'
 
 export type SendMessageDeps = FanoutDeps
@@ -31,6 +32,9 @@ interface SuccessResult {
   poke_skip_reasons?: Array<{ agent_id: string; reason: AutoPokeSkipReason }>
   retry_scheduled: boolean
   retry_delays_s?: number[]
+  /** Stored for a recipient past the reachability window; no wake attempted. */
+  queued_unreachable?: boolean
+  unreachable_seconds?: number
 }
 
 export type SendResult =
@@ -134,14 +138,15 @@ export class SendMessageService {
       .get(resolvedId) as RecipientLookupRow & { last_seen_at: string } | undefined
     if (!rcpt || rcpt.team !== toTeam) return { error: 'unknown_recipient' }
 
-    // Reachability gate: refuse if recipient is not online (TTL-based)
+    // Reachability does not decide whether mail exists: the mailbox is durable.
+    // It only decides whether a wake can be attempted now. A recipient past the
+    // window still receives the stored message, marked queued_unreachable, so a
+    // reply is never lost just because the other side went quiet.
     const ttlMs = REACHABLE_MS_DEFAULT
     const lastSeenMs = new Date(rcpt.last_seen_at).getTime()
     const ageMs = Date.now() - lastSeenMs
-    if (!Number.isFinite(lastSeenMs) || ageMs > ttlMs) {
-      const ageSec = Math.floor(ageMs / 1000)
-      return { error: 'unreachable', detail: `recipient not online (last seen ${ageSec}s ago)` } as SendResult
-    }
+    const reachable = Number.isFinite(lastSeenMs) && ageMs <= ttlMs
+    const unreachableSeconds = reachable ? 0 : Math.max(0, Math.floor(ageMs / 1000))
 
     const recipientRow: RecipientPokeRow = {
       agent_id: rcpt.agent_id,
@@ -149,7 +154,10 @@ export class SendMessageService {
       delivery: parseDeliveryRow(rcpt),
     }
 
-    const baseResult = this.insert({ fromTeam, toTeam, from: input.from, toAgentId: rcpt.agent_id, input })
+    const localOwner = new LocalDeliveryStore(this.db).hasLiveLease(rcpt.agent_id)
+    const baseResult = this.insert({ fromTeam, toTeam, from: input.from, toAgentId: rcpt.agent_id, input, localOwner })
+    // Wake only after the message and intent transaction commits.
+    localArrivalHub(this.db).publish()
 
     // Wake file for claude-job agents: write .xats-wake so the Monitor fires
     const delivery = parseDeliveryRow(rcpt)
@@ -161,8 +169,19 @@ export class SendMessageService {
       } catch { /* best-effort: job_dir may not exist yet */ }
     }
 
+    if (!reachable) {
+      // No wake attempt: record why, but keep the stored message authoritative.
+      recordInitialDeliveryStatuses(this.db, {
+        messageId: baseResult.message_id,
+        recipients: [rcpt.agent_id],
+        delivered: new Set(),
+        skipped: [{ agent_id: rcpt.agent_id, reason: 'queued_unreachable' }],
+      })
+      return { ...baseResult, poked: false, retry_scheduled: false, queued_unreachable: true, unreachable_seconds: unreachableSeconds }
+    }
+
     const autoPokeEnabled = input.auto_poke !== false
-    if (!autoPokeEnabled) {
+    if (!autoPokeEnabled && !localOwner) {
       recordInitialDeliveryStatuses(this.db, {
         messageId: baseResult.message_id,
         recipients: [rcpt.agent_id],
@@ -192,7 +211,7 @@ export class SendMessageService {
   }
 
   private insert(args: {
-    fromTeam: string; toTeam: string; from: string; toAgentId: string; input: SendInput
+    fromTeam: string; toTeam: string; from: string; toAgentId: string; input: SendInput; localOwner: boolean
   }): { message_id: string; event_id: number; recipients: string[]; sent_at: string } {
     const tx = this.db.transaction(() => {
       const needReply = args.input.need_reply !== false ? 1 : 0
@@ -213,6 +232,12 @@ export class SendMessageService {
       ).run(id, event_id, args.fromTeam, args.toTeam, args.from,
         args.toAgentId,
         null, args.input.subject ?? null, args.input.body, needReply, sent_at)
+      // Exactly one owner: a live local lease owns delivery for this generation,
+      // whether or not auto-poke (a tmux wake) is enabled. Without a lease the
+      // polling path owns it and no outbox row exists, so both can never act.
+      if (args.from !== args.toAgentId && args.localOwner) {
+        new LocalDeliveryStore(this.db).enqueue({ messageId: id, agentId: args.toAgentId, eventId: event_id })
+      }
       return { message_id: id, event_id, sent_at }
     })
     const { message_id, event_id, sent_at } = tx()

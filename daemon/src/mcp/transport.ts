@@ -1,5 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import type Database from 'better-sqlite3'
+import { selectRebindCandidate, type LostBinding } from '../daemon/binding-recovery.js'
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { randomUUID, createHash } from 'node:crypto'
@@ -293,6 +295,23 @@ export function mountMcp(
     // Strip it BEFORE the MCP SDK validates strict per-tool argument schemas.
     // Never select an agent by name, PID, or recent activity. An invalid token
     // from an unbound caller is rejected; no token preserves unknown_agent.
+    // A daemon restart drops every in-memory binding. Bind the session that is
+    // ACTUALLY calling, at call time, and only when exactly one identity lost its
+    // binding. Background rebinds are racy: the client replaces its session and
+    // the binding lands on a dead one. Zero or several lost identities is refused.
+    if (session && body?.method === 'tools/call' &&
+        !session.capabilityBoundAgentId && !session.agentIdHolder.current) {
+      const lost = db.prepare('SELECT agent_id, team FROM agents WHERE binding_lost = 1').all() as LostBinding[]
+      const candidate = selectRebindCandidate(lost)
+      if (candidate) {
+        session.bindAgent(candidate.agent_id, candidate.team)
+        db.prepare('UPDATE agents SET binding_lost = 0 WHERE agent_id = ?').run(candidate.agent_id)
+        log(`mcp lazy rebind: sid=${session.sessionId} agent=${candidate.agent_id}`)
+      } else if (lost.length > 1) {
+        log(`mcp lazy rebind refused: ${lost.length} identities lost their binding`)
+      }
+    }
+
     if (session && body?.method === 'tools/call') {
       const args = body.params?.arguments
       const hasToken = args && Object.prototype.hasOwnProperty.call(args, 'xats_bind_token')
