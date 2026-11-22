@@ -109,8 +109,8 @@ has passed.
 
 ## Delivery transport
 
-Delivery hints, not bodies, reach a session. Pi holds a stream, Claude Code
-long-polls the same lease, and Antigravity is woken through a bound tmux pane.
+Delivery hints, not bodies, reach a session. Claude Code and Pi long-poll the
+same delivery lease, and Antigravity is woken through a bound tmux pane.
 See [transports](transports.md) for the invariants and why each harness differs.
 
 ## Sources
