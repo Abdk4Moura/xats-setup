@@ -568,7 +568,7 @@ function startLocalOwner($) {
 
 async function connectLocal($) {
   if (localUnsupported || submitting || pending.length ||
-      String(await $.env.get("XATS_LOCAL_DELIVERY")) !== "1") return false;
+      String(await $.env.get("XATS_LOCAL_DELIVERY")) === "0") return false;
   const file = await acceptedCursorPath($);
   if (!file) return false;
   try {

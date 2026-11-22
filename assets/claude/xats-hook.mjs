@@ -147,9 +147,10 @@ async function start() {
   // as the Pi and opencode adapters do.
   const body = { name: id.name, team: TEAM, agent_type: 'claude-code', session_key: id.sessionKey ?? undefined, name_mode: id.mode, bind_mcp: Boolean(id.sessionKey) };
   if (id.delivery) body.delivery = id.delivery;
-  // Explicit opt-in only. Never expose the adapter capability in model context.
+  // Connected delivery is the default; 0 explicitly selects compatibility mode.
+  // Never expose the adapter capability in model context.
   const deliveryFile = deliveryFileFor(id.tag);
-  if (process.env.XATS_LOCAL_DELIVERY === '1' && id.sessionKey && deliveryFile && !id.delivery) {
+  if (process.env.XATS_LOCAL_DELIVERY !== '0' && id.sessionKey && deliveryFile && !id.delivery) {
     body.local_delivery = true;
   }
   const resp = await post('/api/register', body);

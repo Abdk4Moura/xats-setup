@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 const hook = fileURLToPath(new URL('../assets/claude/xats-hook.mjs', import.meta.url))
 
-test('Claude opt-in hook keeps adapter capability private and removes it on end', { timeout: 15000 }, async t => {
+test('Claude default connected hook keeps capability private and honors explicit opt-out', { timeout: 30000 }, async t => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-local-hook-'))
   const requests = []
   const token = 'a'.repeat(43) // fixture capability, not a real credential
@@ -29,10 +29,13 @@ test('Claude opt-in hook keeps adapter capability private and removes it on end'
     await new Promise(resolve => server.close(resolve))
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
-  const run = (mode, optIn, sid = 'owned-session') => new Promise((resolve, reject) => {
+  const run = (mode, flag, sid = 'owned-session', jobDir = '') => new Promise((resolve, reject) => {
+    const env = { ...process.env, HOME: home, USERPROFILE: home,
+      XATS_BASE: `http://127.0.0.1:${server.address().port}`, CLAUDE_JOB_DIR: jobDir }
+    delete env.XATS_LOCAL_DELIVERY
+    if (flag !== undefined) env.XATS_LOCAL_DELIVERY = flag
     const proc = spawn(process.execPath, [hook, mode], {
-      env: { ...process.env, HOME: home, USERPROFILE: home,
-        XATS_BASE: `http://127.0.0.1:${server.address().port}`, XATS_LOCAL_DELIVERY: optIn ? '1' : '0', CLAUDE_JOB_DIR: '' },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     let stdout = ''; let stderr = ''
@@ -42,18 +45,26 @@ test('Claude opt-in hook keeps adapter capability private and removes it on end'
     proc.on('exit', code => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`hook exit ${code}: ${stderr}`)))
     proc.stdin.end(JSON.stringify({ session_id: sid }))
   })
-  const started = await run('start', true)
+  const started = await run('start')
   assert.equal(requests[0].body.local_delivery, true)
   const file = path.join(home, '.xats', 'sessions', 'owned-session.delivery.json')
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).token, token)
   assert.ok(!started.stdout.includes(token))
   assert.ok(!started.stderr.includes(token))
   if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600)
-  await run('end', true)
-  assert.equal(fs.existsSync(file), false)
-  await run('start', false)
+  await run('start', '0')
   assert.equal(requests.at(-1).body.local_delivery, undefined)
-  assert.equal(fs.existsSync(file), false)
-  await run('start', true, '../unsafe')
+  assert.equal(fs.existsSync(file), false, 'opt-out removes an earlier capability')
+  for (const flag of ['', '1']) {
+    await run('start', flag)
+    assert.equal(requests.at(-1).body.local_delivery, true)
+    assert.equal(fs.existsSync(file), true)
+    await run('end', flag)
+    assert.equal(fs.existsSync(file), false)
+  }
+  await run('start', undefined, '../unsafe')
   assert.equal(requests.at(-1).body.local_delivery, undefined, 'raw session IDs must never create arbitrary paths')
+  await run('start', undefined, '', path.join(home, 'job-1'))
+  assert.equal(requests.at(-1).body.local_delivery, undefined, 'job delivery keeps its own owner')
+  assert.equal(requests.at(-1).body.delivery.kind, 'claude-job')
 })

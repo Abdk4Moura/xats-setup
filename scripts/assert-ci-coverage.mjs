@@ -13,6 +13,7 @@ export const criticalTests = [
   'daemon schema restart preserves zero unread cursors until an actual inbox read',
   'presence expiry marks every agent offline without destroying identity',
   'send_message addresses by name [ref] and never guesses on ambiguity',
+  'default hook and mod deliver through the real daemon without a feature flag',
 ];
 
 export function assertCoverage(log, { files, platform = process.platform }) {

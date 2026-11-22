@@ -48,6 +48,11 @@ Claude Code users can also install the plugin, which draws mail as native UI:
 For a stdio-only MCP client, `npx -y xats-mcp` bridges stdio to the running
 daemon. The listing in the official MCP Registry is `io.github.Abdk4Moura/xats`.
 
+Starting with 0.3.15, supported interactive Claude sessions use connected
+local-first delivery by default. No feature flag is needed after upgrading the
+daemon and Claude integration and restarting Claude. Compatibility polling is
+available with `XATS_LOCAL_DELIVERY=0 claude`.
+
 Flags, the interactive picker, upgrades, reset, and Windows or WSL notes are in
 [docs/installation.md](docs/installation.md).
 

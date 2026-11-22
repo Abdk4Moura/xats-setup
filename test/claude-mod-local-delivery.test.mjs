@@ -12,7 +12,7 @@ function fake(options = {}) {
   let ackFailures = options.ackFailures ?? 0
   const json = (data) => ({ ok: true, status: 200, text: JSON.stringify(data) })
   const $ = {
-    env: { get: async (key) => ({ HOME: '/home/test', XATS_BASE: 'http://localhost:9100', XATS_LOCAL_DELIVERY: options.disabled ? '0' : '1' })[key] },
+    env: { get: async (key) => ({ HOME: '/home/test', XATS_BASE: 'http://localhost:9100', XATS_LOCAL_DELIVERY: options.disabled ? '0' : options.localDelivery })[key] },
     fs: { read: async (file) => files.get(file), write: async (file, value) => { if (options.writeFails) throw new Error('secret error'); files.set(file, value) } },
     session: { id: async () => options.session ?? 'session-1' },
     clock: { after: (ms, fn) => timers.push({ ms, fn }), every: () => {} },
@@ -53,6 +53,24 @@ function fake(options = {}) {
 async function connect(f) { await mod.poll(f.$); assert.equal(mod.state().localOwned, true) }
 
 test.beforeEach(() => mod.reset())
+
+for (const flag of [undefined, '', '1']) test(`connected delivery is enabled with flag ${JSON.stringify(flag)}`, async () => {
+  const f = fake({ localDelivery: flag })
+  await connect(f)
+  await mod.localTick(f.$)
+  assert.equal(f.submits.length, 1)
+  assert.equal(f.acks[0].stage, 'host-queued')
+})
+
+test('explicit 0 opts out before connection and uses compatibility polling', async () => {
+  const f = fake({ disabled: true })
+  await mod.poll(f.$)
+  await mod.deliver(f.$)
+  assert.equal(mod.state().localOwned, false)
+  assert.equal(f.requests.some(r => r.url.includes('/local-delivery/')), false)
+  assert.equal(f.requests.some(r => r.url.includes('/api/inbox')), true)
+  assert.equal(f.submits.length, 1)
+})
 
 test('hint immediately submits only attributed notice; connected mode stops all normal polling', async () => {
   const f = fake()

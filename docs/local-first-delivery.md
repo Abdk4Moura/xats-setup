@@ -1,8 +1,10 @@
 # Local-first xats delivery
 
-Status: design with an opt-in Claude connected-adapter implementation. See
+Status: the connected Claude adapter is the default for supported interactive
+sessions starting with xats-setup 0.3.15. Set `XATS_LOCAL_DELIVERY=0` before
+launching a fresh Claude session to select compatibility polling instead. See
 [implementation and limits](local-first-implementation.md). Native UDS and other
-host upgrades remain gated. Existing default transports remain unchanged.
+host upgrades remain gated; other hosts retain their existing transports.
 
 ## Decision
 

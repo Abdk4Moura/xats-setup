@@ -6,6 +6,8 @@ import path from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { buildSync } from 'esbuild'
+import { spawn } from 'node:child_process'
+import { __internals as mod } from '../assets/claude/mod/hooks/register.js'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(path.join(root, 'package.json'))
@@ -47,6 +49,68 @@ async function fixture(t) {
   }
   return { app, post, wait, send, token, recipient: recipient.data, withDb }
 }
+
+test('default hook and mod deliver through the real daemon without a feature flag', { skip: !deps, timeout: 30000 }, async t => {
+  const f = await fixture(t)
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-default-home-'))
+  mod.reset()
+  t.after(() => { mod.reset(); fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) })
+  const base = await f.app.listen({ port: 0, host: '127.0.0.1' })
+  const env = { ...process.env, HOME: home, USERPROFILE: home, XATS_BASE: base,
+    XATS_NAME: 'claude-default', XATS_TEAM: 'default', CLAUDE_JOB_DIR: '' }
+  delete env.XATS_LOCAL_DELIVERY
+  const runHook = flag => new Promise((resolve, reject) => {
+    const hookEnv = { ...env }
+    if (flag !== undefined) hookEnv.XATS_LOCAL_DELIVERY = flag
+    const child = spawn(process.execPath, [path.join(root, 'assets/claude/xats-hook.mjs'), 'start'], {
+      env: hookEnv, stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let output = ''
+    child.stdout.on('data', chunk => { output += chunk })
+    child.stderr.on('data', chunk => { output += chunk })
+    child.once('error', reject)
+    child.once('exit', code => code === 0 ? resolve(output) : reject(new Error(`hook exited ${code}`)))
+    child.stdin.end(JSON.stringify({ session_id: 'default-session' }))
+  })
+  const output = await runHook()
+  const leaseFile = path.join(home, '.xats/sessions/default-session.delivery.json')
+  const lease = JSON.parse(fs.readFileSync(leaseFile, 'utf8'))
+  assert.ok(!output.includes(lease.token), 'default capability stays out of model context')
+  const submits = []
+  const $ = {
+    env: { get: async key => env[key] },
+    session: { id: async () => 'default-session' },
+    fs: { read: async file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined,
+      write: async (file, value) => fs.writeFileSync(file, value) },
+    clock: { after: () => {}, every: () => {} },
+    ui: { invalidate: () => {} },
+    prompt: { submit: async value => { submits.push(value); return { text: value.text } } },
+    http: { fetch: async (url, init) => {
+      const response = await fetch(url, init)
+      return { ok: response.ok, status: response.status, text: await response.text() }
+    } },
+  }
+  await mod.poll($)
+  assert.equal(mod.state().localOwned, true)
+  const sent = await f.post('/api/send', { from: { name: 'sender', team: 'default' },
+    to: { agent_id: lease.agent_id }, body: 'default-path-message', auto_poke: false })
+  assert.equal(sent.status, 200)
+  assert.equal(sent.data.poked, false)
+  await mod.localTick($)
+  await mod.poll($)
+  await mod.deliver($)
+  assert.equal(submits.length, 1)
+  assert.equal(submits[0].asUser, undefined)
+  await f.withDb(db => {
+    const attempts = db.prepare('SELECT status FROM local_delivery_attempts WHERE message_id = ?').all(sent.data.message_id)
+    assert.deepEqual(attempts, [{ status: 'host-queued' }])
+  })
+  await runHook('0')
+  assert.equal(fs.existsSync(leaseFile), false)
+  await f.withDb(db => {
+    assert.equal(db.prepare('SELECT count(*) AS n FROM local_delivery_leases WHERE agent_id = ? AND revoked_at IS NULL').get(lease.agent_id).n, 0)
+  })
+})
 
 test('local adapter wakes from a commit, remains scoped, and prevents legacy poke', { skip: !deps, timeout: 20000 }, async t => {
   const f = await fixture(t)

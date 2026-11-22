@@ -10,6 +10,15 @@ used the then-installed 2.1.330. In every run the host binary, the plugin, the
 daemon, the MCP transport and the mailbox are real. Where a result depended on a
 specific head, the head is named next to it.
 
+## Default rollout in 0.3.15
+
+Connected delivery is now the default for supported interactive Claude sessions;
+`XATS_LOCAL_DELIVERY=0` selects compatibility polling for a fresh session. The
+historical rigs below explicitly set `1` because they predate that default change.
+The daemon itself does not require the environment flag. Regression tests cover
+unset and empty flags, explicit `1`, explicit `0`, and default hook-to-mod delivery
+through a real isolated daemon, with a simulated host admission receipt.
+
 ## Final acceptance run (rigPP, real model)
 
 One isolated rig, **real model**, pinned host **2.1.295**,
@@ -57,7 +66,7 @@ now pins them.
 
 Two rigs, both isolated from the production bus:
 
-- Rig 1: daemon without opt-in, i.e. the default delivery path.
+- Rig 1: compatibility polling, which was the default at the time of that run.
 - Rig 2: `XATS_LOCAL_DELIVERY=1` on **both** the daemon and the Claude process.
 
 Each rig had its own `CROSS_AGENT_TEAMS_MCP_HOME`, database, port, project

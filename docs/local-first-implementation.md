@@ -1,30 +1,36 @@
-# Local-first delivery: development implementation
+# Local-first delivery: implementation and limits
 
-This branch implements an opt-in connected arrival path for the existing Claude
-mod. It does not implement a production native Claude UDS transport, replace MCP,
-or change paired-host federation. It has not been released to npm.
+Starting with xats-setup 0.3.15, the connected arrival path is the default for
+supported interactive Claude sessions. It does not implement a production native
+Claude UDS transport, replace MCP, or change paired-host federation.
 
-## Enable for a test session
+## Install or upgrade
 
-First build/install this checkout's daemon and Claude integration through the
-normal installer, and ensure the service is actually running the new build.
-Do not enable this against a daemon from an older release.
+Upgrade the daemon, service, and Claude integration together through the normal
+installer, then restart Claude to establish its delivery lease:
 
 ```sh
-npm ci
-npm run build:daemon
-node install.mjs --only=daemon,service,claude --yes
-XATS_LOCAL_DELIVERY=1 claude
+npx xats-setup --only=daemon,service,claude --yes
+claude
 ```
 
-In PowerShell, set `$env:XATS_LOCAL_DELIVERY = '1'` before launching Claude.
-The opt-in must be visible to both the SessionStart hook and the Claude mod.
-Restart the session to establish its lease. No feature flags, native messaging
-credentials, receiver permission policy, or allowlists are changed.
+No environment flag is needed. `XATS_LOCAL_DELIVERY=1` still explicitly enables
+the same path. To select compatibility polling for a fresh session instead:
+
+```sh
+XATS_LOCAL_DELIVERY=0 claude
+```
+
+In PowerShell, set `$env:XATS_LOCAL_DELIVERY = '0'` before launching Claude;
+remove it with `Remove-Item Env:XATS_LOCAL_DELIVERY` to restore the default.
+The setting must be visible to both the SessionStart hook and the Claude mod.
+Opting out never retries a message the host already refused or held, and does
+not replay messages already assigned to a local delivery owner. No native
+messaging credentials, receiver permission policy, or allowlists are changed.
 
 Use `/xats-status` to see whether connected delivery owns the session, whether it
 connected, and any errors. Never paste the private adapter file into diagnostics.
-Other hosts and sessions not opted in retain their existing integrations.
+Other hosts and job-delivery sessions retain their existing integrations.
 
 ## What is implemented
 
@@ -52,8 +58,9 @@ Other hosts and sessions not opted in retain their existing integrations.
   actual mailbox consumption.
 - `get_delivery_status` retains its existing `statuses` field and adds
   `local_delivery` observations when present. These are not model comprehension
-  or task-success receipts. An explicit host `ok: true` yields `host-queued`;
-  undefined host success yields only `transport-written`.
+  or task-success receipts. The real host result `{text}` yields `host-queued`;
+  `{drop}` is classified as retryable busy or terminal refusal according to its
+  reason. Undefined host success yields only `transport-written`.
 - An implicit MCP `get_inbox` read reconciles consumed local hints in the same
   transaction as its mailbox cursor. Explicit-since previews do not consume.
 - The historical zero-cursor migration now has an explicit one-time marker.
@@ -72,11 +79,13 @@ The mod only enters compatibility polling after an explicitly unsupported API
 before any possibly successful wait, or before local ownership was established.
 After ownership uncertainty it reports an error rather than silently changing
 transports. Existing hooks do not silently retry registration against an old daemon
-when the opt-in field is unsupported, so upgrade/restart the daemon first.
+when the local-delivery registration field is unsupported, so upgrade/restart
+the daemon first.
 
-A socket or HTTP write is not proof of model reading. The host's actual busy/idle
-queue behavior still needs live multi-host acceptance testing. Exactly-once model
-execution is not promised. Initial lease acquisition does not retroactively steal
+A socket or HTTP write is not proof of model reading. Real Claude Code 2.1.295
+acceptance covers host refusal, single-owner delivery, restart recovery, and aged
+recipients; see [the acceptance record](local-first-live-acceptance.md). This is
+not a guarantee for every host version. Exactly-once model execution is not promised. Initial lease acquisition does not retroactively steal
 messages already assigned to legacy delivery; those remain in the inbox.
 
 The capability narrows adapter operations to one mailbox; it does not make the

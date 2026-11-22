@@ -56,6 +56,21 @@ Health check:
 curl "http://127.0.0.1:$(cat ~/.xats/port 2>/dev/null || echo 9100)/health"
 ```
 
+## Claude message delivery
+
+Starting with 0.3.15, supported interactive Claude sessions use connected
+local-first delivery by default. Messages are stored durably, then the plugin
+receives arrival hints without waiting for the old three-second polling tick.
+Upgrade the daemon and Claude integration together and restart Claude. No
+feature flag or daemon-service environment change is needed.
+
+Use `/xats-status` to check the active delivery path. To select compatibility
+polling for a fresh session, launch `XATS_LOCAL_DELIVERY=0 claude` (PowerShell:
+`$env:XATS_LOCAL_DELIVERY = '0'`, then `claude`). Unset that variable to restore
+the default. Opting out cannot bypass an earlier refusal or held message and
+does not replay existing locally owned delivery requests. Other hosts are
+unchanged. See [delivery details](local-first-implementation.md).
+
 ## Updating
 
 ```sh
