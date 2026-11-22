@@ -6,7 +6,7 @@ import { agyIdentityName } from '../lib/agy.mjs'
 test('a stdio host pins registration to its configured durable identity', () => {
   const pinned = pinnedCall('register_agent', { name: 'invented-' + Date.now(), cwd: '/work' }, 'agy-box-root')
   assert.equal(pinned.name, 'agy-box-root')
-  assert.equal(pinned.name_mode, 'exact', 'a live collision must be reported, never sufficed into a new id')
+  assert.equal('name_mode' in pinned, false, 'the MCP tool schema rejects fields it does not define')
   assert.equal(pinned.agent_type, 'custom')
   assert.equal(pinned.agent_type_name, 'Antigravity')
   assert.equal(pinned.cwd, '/work', 'other model-supplied fields are preserved')

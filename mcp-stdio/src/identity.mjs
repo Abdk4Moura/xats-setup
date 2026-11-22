@@ -9,9 +9,9 @@ export function pinIdentity(name, args = {}) {
   return {
     ...args,
     name: name.trim(),
-    // exact: a live agent already holding the name is reported, never
-    // silently suffixed into a different durable identity.
-    name_mode: 'exact',
+    // The registration tool has no name_mode: without a session key the daemon
+    // treats (device, team, name) as one durable identity, so the same pinned
+    // name always resolves to the same agent_id. Never invent a suffix.
     agent_type: args.agent_type ?? 'custom',
     agent_type_name: args.agent_type_name ?? 'Antigravity',
   }
