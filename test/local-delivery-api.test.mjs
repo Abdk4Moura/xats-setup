@@ -112,6 +112,38 @@ test('default hook and mod deliver through the real daemon without a feature fla
   })
 })
 
+test('explicit native receipt observations preserve original identity without authorizing stale ACKs', { skip: !deps, timeout: 20000 }, async t => {
+  const f = await fixture(t)
+  assert.equal((await f.post('/api/local-delivery/renew', {}, f.token)).data.receipt_observations, 1)
+  const sent = await f.send('late native refusal', false)
+  const original = (await f.wait(f.token)).json().hints[0]
+  assert.equal((await f.post('/api/local-delivery/ack', { attempt_id: original.attempt_id,
+    stage: 'transport-written' }, f.token)).status, 200)
+  const rebound = await f.post('/api/register', { name: 'claude-local', team: 'default', agent_type: 'claude-code',
+    session_key: 'owned-session', bind_mcp: true, local_delivery: true })
+  assert.equal(rebound.data.agent_id, f.recipient.agent_id)
+  const token = rebound.data.local_delivery.token
+  const replacement = (await f.wait(token)).json().hints[0]
+  assert.notEqual(replacement.attempt_id, original.attempt_id)
+  const body = { attempt_id: original.attempt_id, stage: 'refused' }
+  assert.equal((await f.post('/api/local-delivery/ack', body, token)).status, 409)
+  assert.equal((await f.post('/api/local-delivery/ack', { ...body, observed_generation: replacement.generation }, token)).status, 409)
+  assert.equal((await f.post('/api/local-delivery/ack', { ...body, stage: 'inbox-consumed',
+    observed_generation: original.generation }, token)).status, 409, 'observations are not generic old-epoch write authority')
+  assert.equal((await f.post('/api/local-delivery/ack', { ...body, observed_generation: original.generation }, token)).status, 200)
+  await f.withDb((db, { GetInboxService, AgentsRepo }) => {
+    const read = new GetInboxService(db, new AgentsRepo(db)).get({ caller: f.recipient.agent_id })
+    assert.ok(read.messages.some(m => m.body === 'late native refusal'))
+    const row = db.prepare('SELECT status,attempt_id,generation FROM local_delivery_outbox WHERE message_id=?').get(sent.data.message_id)
+    assert.equal(row.status, 'refused')
+    assert.equal(row.attempt_id, original.attempt_id)
+    assert.equal(row.generation, original.generation)
+  })
+  await f.send('expired native notice', false)
+  const expiring = (await f.wait(token)).json().hints[0]
+  assert.equal((await f.post('/api/local-delivery/ack', { attempt_id: expiring.attempt_id, stage: 'expired' }, token)).status, 200)
+})
+
 test('local adapter wakes from a commit, remains scoped, and prevents legacy poke', { skip: !deps, timeout: 20000 }, async t => {
   const f = await fixture(t)
   const pending = f.wait(f.token, 10000)

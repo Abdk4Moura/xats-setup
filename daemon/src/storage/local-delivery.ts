@@ -336,6 +336,62 @@ export class LocalDeliveryStore {
     })()
   }
 
+  /** Report an actual host receipt, not a fresh dispatch or a stale-generation ACK.
+   * A live observer for the same mailbox AND session may settle the original
+   * attempt after restart. Never relabel that receipt as a replacement's write.
+   */
+  observe(token: string, args: { attemptId: string; generation: number; stage: DeliveryStage; now?: number }): boolean {
+    const now = time(args.now)
+    if (!['host-queued', 'held', 'refused', 'expired', 'failed'].includes(args.stage)) return false
+    return this.db.transaction(() => {
+      this.expireLeases(now)
+      const lease = this.authenticate(token, now)
+      if (!lease) return false
+      const source = this.db.prepare(`SELECT a.*, l.session_key FROM local_delivery_attempts a
+        JOIN local_delivery_leases l ON l.agent_id=a.agent_id AND l.generation=a.generation
+        WHERE a.attempt_id=?`).get(args.attemptId) as {
+          attempt_id: string; message_id: string; agent_id: string; generation: number;
+          status: DeliveryStage; session_key: string
+        } | undefined
+      if (!source || source.agent_id !== lease.agentId || source.session_key !== lease.sessionKey ||
+          source.generation !== args.generation || source.generation > lease.generation) return false
+      const prior = this.db.prepare('SELECT 1 FROM local_delivery_facts WHERE attempt_id=? AND stage=?')
+        .get(source.attempt_id, args.stage)
+      if (prior) return true
+      if (['refused', 'expired', 'failed'].includes(source.status)) return false
+      const admitted = this.db.prepare("SELECT 1 FROM local_delivery_facts WHERE attempt_id=? AND stage='host-queued'")
+        .get(source.attempt_id)
+      if (admitted && args.stage !== 'host-queued') return false
+      const row = this.db.prepare('SELECT * FROM local_delivery_outbox WHERE message_id=? AND agent_id=?')
+        .get(source.message_id, lease.agentId) as LocalDeliveryRow | undefined
+      if (!row) return false
+      this.db.prepare('INSERT INTO local_delivery_facts (attempt_id,stage,observed_at) VALUES (?,?,?)')
+        .run(source.attempt_id, args.stage, now)
+      this.db.prepare('UPDATE local_delivery_attempts SET status=?,updated_at=? WHERE attempt_id=?')
+        .run(args.stage, now, source.attempt_id)
+      // A different terminal decision is never opened by a delayed success.
+      if (row.attempt_id !== source.attempt_id && ['refused', 'expired', 'failed'].includes(row.status)) return true
+      if (row.attempt_id && row.attempt_id !== source.attempt_id && !completionRank[row.status]) {
+        this.db.prepare("UPDATE local_delivery_attempts SET status='unknown',updated_at=? WHERE attempt_id=?")
+          .run(now, row.attempt_id)
+        this.db.prepare("INSERT OR IGNORE INTO local_delivery_facts (attempt_id,stage,observed_at) VALUES (?,'unknown',?)")
+          .run(row.attempt_id, now)
+      }
+      // Anchor the outbox to the actual receipt's original ID and generation.
+      // The replacement capability does not become authority to dispatch there.
+      this.db.prepare(`UPDATE local_delivery_outbox SET status=?,attempt_id=?,generation=?,updated_at=?
+        WHERE message_id=? AND agent_id=?`)
+        .run(args.stage, source.attempt_id, source.generation, now, source.message_id, lease.agentId)
+      if (args.stage === 'host-queued') {
+        // A covering read is proved only by the daemon's own persisted cursor.
+        const cursor = this.db.prepare('SELECT last_processed_event_id FROM agents WHERE agent_id=?')
+          .get(lease.agentId) as { last_processed_event_id: number } | undefined
+        if (cursor) this.consumeThrough(lease.agentId, cursor.last_processed_event_id, now)
+      }
+      return true
+    })()
+  }
+
   acknowledge(token: string, args: { attemptId: string; stage: DeliveryStage; now?: number }): boolean {
     const now = time(args.now)
     if (!stages.has(args.stage) || args.stage === 'stored' || args.stage === 'claimed') return false

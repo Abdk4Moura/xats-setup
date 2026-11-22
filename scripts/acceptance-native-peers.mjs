@@ -28,8 +28,10 @@ const modelCalls = [];
 const failures = [];
 const payload = 'native-claude-to-pi-fixture';
 const replyPayload = 'native-pi-to-claude-fixture';
-const policy = process.env.XATS_NATIVE_POLICY || 'accept';
-assert.ok(['accept', 'hold', 'refuse'].includes(policy));
+const profile = process.env.XATS_NATIVE_POLICY || 'accept';
+assert.ok(['accept', 'hold', 'refuse', 'restart-refuse'].includes(profile));
+const policy = profile === 'restart-refuse' ? 'hold' : profile;
+const refuses = profile === 'refuse' || profile === 'restart-refuse';
 const userSettings = path.join(home, '.claude/settings.json');
 fs.mkdirSync(path.dirname(userSettings), { recursive: true, mode: 0o700 });
 fs.writeFileSync(userSettings, JSON.stringify({ crossSessionInbound: policy }), { mode: 0o600 });
@@ -226,7 +228,15 @@ try {
     assert.equal(nativeFact()?.admission_source, null, 'an undelivered held/refused message must not have a positive admission witness');
     assert.equal(sawNativeNotice, false, 'held/refused traffic must not fall back to a prompt');
     assert.equal(sawReplyBody, false);
-    if (policy === 'hold') {
+    if (profile === 'restart-refuse') {
+      await stop(daemon);
+      daemon = await startDaemon(port);
+      fs.writeFileSync(userSettings, JSON.stringify({ crossSessionInbound: 'refuse' }));
+      await until(() => alive() && nativeFact()?.state === 'refused', 10000);
+      // This real MCP call reconnects/rebinds to the restarted daemon. The old
+      // native refusal must then be reported by a new, same-session observer.
+    }
+    if (!refuses) {
       // The fixture's trusted user settings are watched by the real host.
       // Actual host policy release, never an adapter timer, admits this message.
       fs.writeFileSync(userSettings, JSON.stringify({ crossSessionInbound: 'accept' }));
@@ -240,7 +250,7 @@ try {
     }
   }
   await until(() => alive() && sawReplyBody, 45000);
-  const expectedFinal = policy === 'refuse' ? 'refused' : 'inbox-consumed';
+  const expectedFinal = refuses ? 'refused' : 'inbox-consumed';
   await until(() => row()?.status === expectedFinal, 5000);
   assert.equal(row()?.status, expectedFinal);
   assert.equal(db.prepare('SELECT count(*) AS n FROM local_delivery_outbox WHERE message_id=?').get(replyId).n, 1);
@@ -248,9 +258,9 @@ try {
   assert.equal(attempts, 1, 'native and plugin polling must not both own the same message');
   const nativeReply = await until(() => {
     const fact = nativeFact();
-    return fact?.state === (policy === 'refuse' ? 'refused' : 'host-queued') && fact;
+    return fact?.state === (refuses ? 'refused' : 'host-queued') && fact;
   }, 5000);
-  if (policy !== 'refuse') assert.ok(nativeReply.admission_source === 'session.receive' || nativeReply.wire_status === 'delivered',
+  if (!refuses) assert.ok(nativeReply.admission_source === 'session.receive' || nativeReply.wire_status === 'delivered',
     'a real queued host callback or native wire receipt, not a socket write, must prove admission');
   else {
     const facts = db.prepare('SELECT f.stage FROM local_delivery_facts f JOIN local_delivery_attempts a USING(attempt_id) WHERE a.message_id=?').all(replyId);
@@ -259,6 +269,11 @@ try {
   }
   assert.equal(journal.prepare("SELECT count(*) AS n FROM incoming WHERE state='stored'").get().n, 1);
   const finalStatus = row()?.status;
+  const currentGeneration = db.prepare('SELECT max(generation) AS n FROM local_delivery_leases').get().n;
+  if (profile === 'restart-refuse') {
+    assert.ok(currentGeneration > row().generation, 'the receipt keeps its old generation despite a new observer');
+    assert.ok(db.prepare("SELECT count(*) AS n FROM local_delivery_facts WHERE stage='refused'").get().n > 0);
+  }
   journal.close();
   db.close();
   await stop(claude);
@@ -268,8 +283,9 @@ try {
   const after = await request('/api/inbox?team=default&name=pi-native-fixture&since_event_id=0');
   assert.equal(after.messages.filter(m => m.body.includes(payload)).length, 1, 'native mailbox commit survives daemon restart exactly once');
   console.log(JSON.stringify({ realCli: true, syntheticModel: true, nativeListAgentsDiscoveredPi: true,
-    nativeSendMessageCommittedPiMailbox: true, cliVersion, policy, nativeReplyObservation: nativeReply,
-    replyBodyReadByRealMcp: sawReplyBody, terminalRefusalPreserved: policy === 'refuse' ? finalStatus === 'refused' : undefined,
+    nativeSendMessageCommittedPiMailbox: true, cliVersion, profile, policy, nativeReplyObservation: nativeReply,
+    observerGeneration: currentGeneration,
+    replyBodyReadByRealMcp: sawReplyBody, terminalRefusalPreserved: refuses ? finalStatus === 'refused' : undefined,
     attempts, daemonRestartPreservedMail: true,
     featureFlagSpecified: false, calls: modelCalls, modelRequests: requestCount }, null, 2));
 } catch (error) {
@@ -285,7 +301,7 @@ try {
       j.close();
     } catch { /* startup may not have created a journal */ }
   }
-  console.error(JSON.stringify({ error: error.message, policy, calls: modelCalls, modelRequests: requestCount,
+  console.error(JSON.stringify({ error: error.message, profile, policy, calls: modelCalls, modelRequests: requestCount,
     failures, nativeDiagnostics, stderrTail: stderr.slice(-1200), stdoutTail: stdout.slice(-2000) }, null, 2));
   throw error;
 } finally {

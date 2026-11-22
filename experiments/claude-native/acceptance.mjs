@@ -71,7 +71,7 @@ try {
       && receipt.correlated && receipt.process_start_matches));
   }
   for (const [version, binary] of [[pins.claude.version, cli], [pins.claudeCurrent.version, currentCli]]) {
-    for (const policy of ['accept', 'refuse', 'hold']) {
+    for (const policy of ['accept', 'refuse', 'hold', 'restart-refuse']) {
       const nativeAdapter = spawnSync(process.execPath, [path.join(repo, 'scripts/acceptance-native-peers.mjs')], {
         cwd: repo, env: { ...env, XATS_NATIVE_CLAUDE: binary, XATS_NATIVE_EXPECT_VERSION: version, XATS_NATIVE_POLICY: policy },
         encoding: 'utf8', timeout: 90000, maxBuffer: 2 * 1024 * 1024,

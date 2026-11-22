@@ -27,7 +27,9 @@ section. Native Claude-only peer entries remain unchanged.
 ## Capability selection and opt-out
 
 The candidate requires a Linux native inbox socket exported by Claude Code,
-Python 3 with Linux `SO_PEERCRED`, and the installed daemon/Claude integration.
+Python 3 with Linux `SO_PEERCRED`, and the updated daemon/Claude integration.
+The mod probes the daemon's receipt-observation capability before native I/O;
+an older daemon keeps connected plugin notices.
 No additional host binary is downloaded. A lightweight helper is attached to the
 Claude session and stops when the owning process or mod ends.
 
@@ -71,8 +73,14 @@ second submission method for that message.
   fallback timer. A released hold wakes receipt reconciliation even while the
   adapter is waiting for another daemon hint.
 - The existing local outbox, lease, generation fences, acknowledgement retries,
-  and MCP inbox cursor remain authoritative. The native journal is a dispatch
-  fence, not a second mailbox or an independent delivery owner.
+  and MCP inbox cursor remain authoritative. A live observer can report a late
+  receipt only for the same mailbox and session, explicitly naming its original
+  attempt and generation. Ordinary stale ACKs still fail. The daemon settles the
+  actual original attempt, not a fabricated replacement dispatch; a covering
+  read cannot erase a delayed refusal. Read reconciliation uses the daemon's own
+  stored MCP cursor, never a client-supplied cursor.
+- The native journal is a dispatch fence, not a second mailbox or an independent
+  delivery owner.
 
 As with the existing same-user loopback API, this is not a sandbox against other
 processes running as the same operating-system user.
@@ -80,15 +88,18 @@ processes running as the same operating-system user.
 ## Acceptance scope
 
 CI requires actual native interoperability on Claude Code 2.1.295 and 2.1.330,
-with accept, refuse and hold/release profiles on each. Each fixture has its own
+with accept, refuse, hold/release and restart-before-refusal profiles on each. Each fixture has its own
 HOME, native socket, loopback daemon and synthetic model endpoint. It exercises
 real `ListAgents`, `SendMessage`, native IPC and MCP inbox tools. The peer is a
 Pi-typed durable mailbox fixture, not a running Pi model.
 
 The refusal profile explicitly reads the inbox after refusal and requires the
-attempt to remain refused. The hold profile changes the fixture's trusted host
-policy, requires actual release without another dispatch, and then reads the
-inbox. Queue-admission evidence, one outbox attempt, and restart persistence are
+attempt to remain refused. A second refusal profile restarts the daemon while
+the native host holds the notice, then obtains its actual refusal and reconnects
+the real MCP client. A live replacement observer must settle the original
+attempt and generation even after that inbox read. The hold profile changes the
+fixture's trusted host policy, requires actual release without another dispatch,
+and then reads the inbox. Queue-admission evidence, one outbox attempt, and restart persistence are
 asserted separately. These are required gates, not a claim that a pending CI run
 has passed.
 

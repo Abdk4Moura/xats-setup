@@ -23,6 +23,7 @@
 // not follow the mods API ($) across an imported function boundary.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STAGES = ["transport-written", "host-queued", "inbox-consumed", "held", "refused", "expired", "failed", "unknown"];
+const NATIVE_OBSERVATIONS = ["host-queued", "held", "refused", "expired", "failed"];
 let bridge = null;
 let error = "";
 
@@ -51,6 +52,9 @@ function receive(state, value) {
     const request = state.requests.get(value.attempt_id);
     if (!request || request.generation !== value.generation || request.event_id !== value.event_id ||
         !STAGES.includes(value.stage)) return;
+    const prior = state.latest.get(value.attempt_id)?.stage;
+    if (["refused", "expired", "failed"].includes(prior) && prior !== value.stage) return;
+    if (prior === "host-queued" && ["transport-written", "unknown", "held"].includes(value.stage)) return;
     state.receipts.push(value);
     state.latest.set(value.attempt_id, value);
   } else if (value.kind === "diagnostic") {
@@ -128,6 +132,16 @@ export async function connectNativeBridge($, { cursorPath, agentId, base, rearm 
   const home = (await $.env.get("HOME")) || "";
   const session = cursorPath.match(/\/([A-Za-z0-9_-]{1,128})\.cursor\.json$/)?.[1];
   if (!home.startsWith("/") || !session || !UUID.test(agentId)) return false;
+  // Capability selection precedes native I/O. Old daemons keep the connected
+  // transport; a previously selected native owner never switches transports.
+  try {
+    if (!localLease) return wasSelected;
+    await validateLocalLease($, localLease);
+    if (localLease.receiptObservations !== 1) {
+      error = "native receipt observations unsupported; connected delivery";
+      return wasSelected;
+    }
+  } catch { error = "native receipt capability unavailable"; return wasSelected; }
   if (bridge) await stopNativeBridge($);
   const state = { agentId, cursorPath, root: `${home}/.xats/native/${session}`, ownerSocket: socket, socketRoot: "", pid: null,
     ready: false, everReady: wasSelected, closed: false, peers: [], rawPeers: [],
@@ -863,6 +877,7 @@ async function validateLocalLease($, lease) {
     throw error;
   }
   lease.expiresAt = data.expiresAt;
+  lease.receiptObservations = data.receipt_observations === 1 ? 1 : 0;
 }
 
 async function refreshLocalLease($) {
@@ -1050,37 +1065,61 @@ async function performNativeReceiptFlush($) {
   while (nativeReceipts.length) {
     const fact = nativeReceipts[0];
     if (epoch !== localEpoch) return;
-    if (!localLease || fact.generation !== localLease.generation) {
+    const observation = NATIVE_OBSERVATIONS.includes(fact.stage);
+    if (observation) {
+      const prior = localOutcomes[fact.event_id]?.stage;
+      if (["refused", "expired", "failed"].includes(prior) && prior !== fact.stage) {
+        nativeReceipts.shift();
+        continue;
+      }
+      // Save terminal policy by event BEFORE considering a replacement lease.
+      // A delayed old-generation refusal must survive a covering MCP read.
+      if (fact.stage === "host-queued") {
+        delete localOutcomes[fact.event_id];
+        acceptedEventId = Math.max(acceptedEventId, fact.event_id);
+        lastEventId = Math.max(lastEventId, acceptedEventId);
+      } else localOutcomes[fact.event_id] = { attempt_id: fact.attempt_id,
+        generation: fact.generation, event_id: fact.event_id, stage: fact.stage };
+      await writeCursor($);
+      if (epoch !== localEpoch) return;
+    }
+    if (!localLease) throw new Error("native receipt awaiting a live observer lease");
+    if (!observation && fact.generation !== localLease.generation) {
       nativeReceipts.shift();
       continue;
     }
     const lease = { ...localLease };
     const current = fact.attempt_id === localAttempt?.attempt_id && fact.event_id === localAttempt?.event_id;
-    if (current && (["refused", "expired", "failed"].includes(localAttempt.stage) ||
+    if (!observation && current && (["refused", "expired", "failed"].includes(localAttempt.stage) ||
         (localAttempt.stage === "host-queued" && !["host-queued", "inbox-consumed"].includes(fact.stage)))) {
       nativeReceipts.shift();
       continue;
     }
     // A late receipt still belongs to its original attempt. It must not replace
     // a newer cursor journal, or be stamped with replacement credentials.
-    if (current && localAttempt.stage !== "inbox-consumed") {
-      await saveLocalAttempt($, fact, fact.stage, ["host-queued", "transport-written"].includes(fact.stage));
+    if (!observation && current && localAttempt.stage !== "inbox-consumed") {
+      await saveLocalAttempt($, fact, fact.stage, fact.stage === "transport-written");
     }
     try {
-      await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: fact.stage }, lease);
+      await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: fact.stage,
+        ...(observation ? { observed_generation: fact.generation } : {}) }, lease);
     } catch (error) {
-      if ([404, 409, 410].includes(error?.status)) { nativeReceipts.shift(); continue; }
+      if (!observation && [404, 409, 410].includes(error?.status)) { nativeReceipts.shift(); continue; }
       throw error;
     }
     if (epoch !== localEpoch) return;
-    if (current && fact.stage === "host-queued") {
+    const sameEvent = fact.event_id === localAttempt?.event_id;
+    if (observation && sameEvent) await saveLocalAttempt($, fact, fact.stage, fact.stage === "host-queued");
+    if (sameEvent && fact.stage === "host-queued") {
       const base = await baseUrl($);
       if (epoch !== localEpoch) return;
       const cursor = await readMailboxCursor($, base);
       if (epoch !== localEpoch) return;
       if (cursor !== null && cursor >= fact.event_id) {
         await saveLocalAttempt($, fact, "inbox-consumed");
-        await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: "inbox-consumed" }, lease);
+        // The daemon already reconciles its own durable cursor atomically with
+        // an observed host receipt. Do not ACK an old ID using a newer epoch.
+        if (!observation) await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: "inbox-consumed" }, lease);
       }
     }
     nativeReceipts.shift();
@@ -1430,6 +1469,8 @@ export function register(on, options) {
 export const __internals = {
   poll,
   classifySubmitResult,
+  processLocalHint,
+  flushNativeReceipts,
   localTick,
   renewLocal,
   deliver,

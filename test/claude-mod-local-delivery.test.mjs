@@ -1,18 +1,19 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { __internals as mod, register } from '../assets/claude/mod/hooks/register.js'
+import { __internals as mod, __nativeInternals as native, nativeBridgeState, register } from '../assets/claude/mod/hooks/register.js'
 
 const root = '/home/test/.xats/sessions/session-1'
 const lease = { version: 1, agent_id: 'agent-1', token: 'a'.repeat(43), generation: 1, expiresAt: Date.now() + 120000 }
 const hint = { message_id: 'message-7', event_id: 7, attempt_id: 'attempt-1', generation: 1 }
 const message = { id: hint.message_id, event_id: 7, from_name: 'pi', subject: 'hello', body: 'SECRET BODY' }
 function fake(options = {}) {
-  const files = options.files ?? new Map([[`${root}.delivery.json`, JSON.stringify(lease)]])
+  const files = options.files ?? new Map([[`${root}.delivery.json`, JSON.stringify(options.lease ?? lease)]])
   const requests = [], submits = [], timers = [], acks = []
   let ackFailures = options.ackFailures ?? 0
   const json = (data) => ({ ok: true, status: 200, text: JSON.stringify(data) })
   const $ = {
-    env: { get: async (key) => ({ HOME: '/home/test', XATS_BASE: 'http://localhost:9100', XATS_LOCAL_DELIVERY: options.disabled ? '0' : options.localDelivery })[key] },
+    env: { get: async (key) => ({ HOME: '/home/test', XATS_BASE: 'http://localhost:9100', XATS_LOCAL_DELIVERY: options.disabled ? '0' : options.localDelivery,
+      CLAUDE_CODE_MESSAGING_SOCKET: options.nativeSocket })[key] },
     fs: { read: async (file) => files.get(file), write: async (file, value) => { if (options.writeFails) throw new Error('secret error'); files.set(file, value) } },
     session: { id: async () => options.session ?? 'session-1' },
     clock: { after: (ms, fn) => timers.push({ ms, fn }), every: () => {} },
@@ -26,7 +27,7 @@ function fake(options = {}) {
         if (response !== undefined) return response;
       }
       if (url.includes('/local-delivery/')) assert.ok((options.tokens ?? [lease.token]).includes(init.headers['X-Xats-Delivery-Token']))
-      if (url.includes('/api/agents')) return json({ agents: [{ agent_id: lease.agent_id, name: 'claude', session_key: options.session ?? 'session-1' }] })
+      if (url.includes('/api/agents')) return json({ agents: [{ agent_id: options.lease?.agent_id ?? lease.agent_id, name: 'claude', session_key: options.session ?? 'session-1' }] })
       if (url.includes('/api/cursor')) return json({ last_processed_event_id: options.cursor ?? 0 })
       if (url.includes('/api/inbox')) {
         assert.ok(new URL(url).searchParams.has('since_event_id'))
@@ -112,6 +113,52 @@ for (const [label, options, stage] of [
   assert.equal(f.acks[1].stage, stage)
   assert.equal(f.submits.length, stage === 'inbox-consumed' ? 0 : 1)
   assert.doesNotMatch(JSON.stringify(mod.state()), /private-token/)
+})
+
+test('an old daemon without receipt observations keeps connected ownership before native I/O', async () => {
+  const f = fake({ lease: { ...lease, agent_id: '11111111-1111-4111-8111-111111111111' },
+    nativeSocket: '/run/user/1000/cc-socks/111.sock' })
+  await connect(f)
+  assert.equal(nativeBridgeState().selected, false)
+  assert.ok(f.requests.some(r => r.url.endsWith('/renew')), 'probe the real daemon capability before native selection')
+  await mod.localTick(f.$)
+  assert.equal(f.submits.length, 1)
+  assert.equal(mod.state().localOwned, true)
+})
+
+test('a delayed old-generation refusal persists before a covering read and keeps its original attempt identity', async () => {
+  const original = { ...hint, attempt_id: '11111111-1111-4111-8111-111111111111',
+    message_id: '33333333-3333-4333-8333-333333333333' }
+  const replacement = { ...original, attempt_id: '22222222-2222-4222-8222-222222222222', generation: 2 }
+  const newLease = { ...lease, generation: 2, token: 'b'.repeat(43) }
+  const options = { result: undefined, hints: [original], messages: [{ ...message, id: original.message_id }],
+    tokens: [lease.token, newLease.token] }
+  const f = fake(options)
+  await connect(f)
+  await mod.localTick(f.$)
+  const state = { ready: true, everReady: true, agentId: lease.agent_id, root: '/private/native',
+    requests: new Map([[original.attempt_id, original]]), latest: new Map(), receipts: [] }
+  native.setState(state)
+  f.files.set(`${root}.delivery.json`, JSON.stringify(newLease))
+  options.generation = 2
+  options.hints = [replacement]
+  options.fetch = async (url, init) => {
+    if (url.endsWith('/renew')) return init.headers['X-Xats-Delivery-Token'] === lease.token
+      ? { ok: false, status: 401, text: '{}' }
+      : { ok: true, status: 200, text: JSON.stringify({ generation: 2, expiresAt: newLease.expiresAt, receipt_observations: 1 }) }
+  }
+  await mod.renewLocal(f.$)
+  await mod.localTick(f.$)
+  assert.equal(mod.state().localAttempt.attempt_id, replacement.attempt_id)
+  native.receive(state, { kind: 'receipt', attempt_id: original.attempt_id, generation: 1, event_id: 7, stage: 'refused' })
+  await mod.flushNativeReceipts(f.$)
+  assert.deepEqual(f.acks.at(-1), { attempt_id: original.attempt_id, stage: 'refused', observed_generation: 1 })
+  assert.equal(mod.state().localOutcomes[7].stage, 'refused')
+  options.cursor = 7
+  assert.equal(await mod.processLocalHint(f.$, replacement), 'refused')
+  assert.equal(f.submits.length, 1, 'neither generation replays a host submission')
+  const saved = JSON.parse(f.files.get(`${root}.cursor.json`))
+  assert.equal(saved.local_outcomes['7'].stage, 'refused')
 })
 
 test('lost ack retries same attempt without another wait or host submission', async () => {
