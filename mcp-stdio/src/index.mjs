@@ -77,7 +77,8 @@ async function main() {
     server.setRequestHandler(ListToolsRequestSchema, async () => client.listTools())
     server.setRequestHandler(CallToolRequestSchema, async (request) =>
       client.callTool({ name: request.params.name,
-        arguments: pinnedCall(request.params.name, request.params.arguments, PINNED_NAME) }))
+        arguments: pinnedCall(request.params.name, request.params.arguments, PINNED_NAME,
+          request.params._meta) }))
   }
 
   if (capabilities.resources) {

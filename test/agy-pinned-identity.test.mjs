@@ -26,3 +26,20 @@ test('the pinned name is stable per box and independent of session timing', () =
   assert.match(first, /^agy-[a-z0-9_-]+-[a-z0-9_-]+$/)
   assert.equal(agyIdentityName(paths), first)
 })
+
+test('each Antigravity instance gets its own name while one conversation stays stable', () => {
+  const base = 'agy-box-root'
+  const a = pinnedCall('register_agent', {}, base, { 'antigravity.google/root_conversation_id': 'conv-a' })
+  const b = pinnedCall('register_agent', {}, base, { 'antigravity.google/root_conversation_id': 'conv-b' })
+  const aAgain = pinnedCall('register_agent', {}, base, { 'antigravity.google/root_conversation_id': 'conv-a' })
+  assert.match(a.name, /^agy-box-root-[0-9a-f]{8}$/)
+  assert.notEqual(a.name, b.name, 'two live instances must not share one mailbox')
+  assert.equal(a.name, aAgain.name, 'a reload of the same conversation keeps its identity')
+  assert.equal('name_mode' in a, false)
+})
+
+test('without a host conversation id there is exactly one identity per box', () => {
+  const pinned = pinnedCall('register_agent', {}, 'agy-box-root', {})
+  assert.equal(pinned.name, 'agy-box-root')
+  assert.equal(pinnedCall('register_agent', {}, 'agy-box-root', { 'antigravity.google/root_conversation_id': undefined }).name, 'agy-box-root')
+})
