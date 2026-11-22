@@ -45,6 +45,9 @@ try {
   const unit = run(['-m', 'unittest', 'discover', '-s', here, '-p', 'test_*.py', '-v']);
   assert.match(unit, /Ran [1-9]\d* tests? in/);
   assert.doesNotMatch(unit, /skipped|expected failure|unexpected success/i);
+  const adapterUnit = run(['-m', 'unittest', 'discover', '-s', path.join(repo, 'test/native-peer'), '-p', 'test_*.py', '-v']);
+  assert.match(adapterUnit, /Ran [1-9]\d* tests? in/);
+  assert.doesNotMatch(adapterUnit, /skipped|expected failure|unexpected success/i);
   probe('policy_probe.py', ['--policy', 'refuse']);
   probe('policy_probe.py', ['--policy', 'hold']);
   probe('outbound_probe.py');
@@ -65,6 +68,13 @@ try {
     assert.ok(report?.receipts.some(receipt => receipt.status === (policy === 'hold' ? 'held' : 'refused')
       && receipt.correlated && receipt.process_start_matches));
   }
+  const nativeAdapter = spawnSync(process.execPath, [path.join(repo, 'scripts/acceptance-native-peers.mjs')], {
+    cwd: repo, env, encoding: 'utf8', timeout: 90000, maxBuffer: 2 * 1024 * 1024,
+  });
+  if (nativeAdapter.stdout) process.stdout.write(nativeAdapter.stdout);
+  if (nativeAdapter.stderr) process.stderr.write(nativeAdapter.stderr);
+  if (nativeAdapter.error) throw nativeAdapter.error;
+  assert.equal(nativeAdapter.status, 0, 'Actual default native peer adapter acceptance failed');
   console.log('Experimental Linux native protocol acceptance passed: refusal, hold, actual native SendMessage, xats mailbox commit, duplicate fencing, and backend restart. Synthetic model only; no production transport enabled.');
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

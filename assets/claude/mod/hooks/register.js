@@ -19,9 +19,14 @@
  * poll timer, which is a background job.
  */
 
-// Stamped into /xats-status: if this string is not what you just deployed, the
-// host is running an older copy of the mod and nothing else you see matters.
-const MOD_BUILD = "2026-10-25-local-delivery-v6";
+import { connectNativeBridge, nativeSubmit, nativeBridgeState, drainNativeReceipts,
+  stopNativeBridge, listNativePeers, listNativePeerCommand, routeNativeSend,
+  __nativeInternals } from "./native-peer.js";
+
+// Stamped into /xats-status so an old loaded mod is distinguishable from disk.
+const MOD_BUILD = "2026-11-22-native-peer-v1";
+const TERMINAL_OUTCOMES = ["held", "refused", "expired", "failed"];
+let nativeReceipts = [];
 
 let lastSessionID = "";
 let lastAgentsSeen = "none";
@@ -264,19 +269,19 @@ async function loadAcceptedCursor($) {
       acceptedEventId = saved.event_id;
       lastEventId = Math.max(lastEventId, acceptedEventId);
       if (saved.local_delivery && typeof saved.local_delivery.attempt_id === "string" &&
-          ["host-queued", "transport-written", "inbox-consumed", "held", "refused", "failed", "unknown"].includes(saved.local_delivery.stage)) {
+          ["host-queued", "transport-written", "inbox-consumed", "held", "refused", "expired", "failed", "unknown"].includes(saved.local_delivery.stage)) {
         localAttempt = saved.local_delivery;
       }
       for (const attempt of Object.values(saved.local_outcomes ?? {})) {
         if (Number.isSafeInteger(attempt?.event_id) && attempt.event_id > 0 &&
-            ["held", "refused", "unknown"].includes(attempt.stage)) {
+            [...TERMINAL_OUTCOMES, "unknown"].includes(attempt.stage)) {
           localOutcomes[attempt.event_id] = attempt;
         }
       }
       // Migrate the original single-attempt journal without changing version 1.
       if (Number.isSafeInteger(localAttempt?.event_id) && localAttempt.event_id > 0 &&
           localAttempt.retryable !== true &&
-          ["held", "refused", "unknown"].includes(localAttempt.stage)) {
+          [...TERMINAL_OUTCOMES, "unknown"].includes(localAttempt.stage)) {
         localOutcomes[localAttempt.event_id] = localAttempt;
       }
       if (localAttempt || Object.keys(localOutcomes).length) localCanFallback = false;
@@ -328,7 +333,7 @@ async function readMailboxCursor($, base) {
       // A refusal or hold is the host's decision, not an uncertainty: advancing
       // the cursor must not erase it, or a later generation would rewrite it.
       const stage = localOutcomes[id]?.stage;
-      if (stage === "refused" || stage === "held") continue;
+      if (TERMINAL_OUTCOMES.includes(stage)) continue;
       if (Number(id) <= cursor) { delete localOutcomes[id]; pruned = true; }
     }
     // Only uncertainty may be resolved by a real read. A refusal or an explicit
@@ -384,7 +389,7 @@ async function deliver($) {
     // an option here — peer mail must never look like the person typed it.
     const result = await $.prompt.submit({ text: payloadText(batch) });
     const stage = classifySubmitResult(result);
-    if (stage === "refused" || stage === "held") {
+    if (TERMINAL_OUTCOMES.includes(stage)) {
       // An explicit host refusal or hold is a decision: the polling path must
       // never resubmit it.
       lastSubmitError = typeof result?.drop === "string"
@@ -587,6 +592,7 @@ async function connectLocal($) {
     // renewed this generation. Never extend it locally without server proof.
     if (expiry <= Date.now()) await validateLocalLease($, lease);
     localLease = lease;
+    await connectNativeBridge($, { cursorPath: file, agentId, base: await baseUrl($) });
     startLocalOwner($);
     localError = "";
     return true;
@@ -640,6 +646,7 @@ async function renewLocal($) {
   try {
     if (localLease) await validateLocalLease($, localLease);
     else await refreshLocalLease($);
+    await connectNativeBridge($, { cursorPath, agentId, base: await baseUrl($), rearm: true });
     localError = "";
   } catch (error) {
     await tickLog($, `error ${error?.code || error?.name || "err"} status=${error?.status ?? "-"}`)
@@ -653,7 +660,7 @@ async function renewLocal($) {
 async function saveLocalAttempt($, hint, stage, accepted = false, { blocking = true, retryable = false } = {}) {
   localAttempt = { attempt_id: hint.attempt_id, generation: hint.generation, event_id: hint.event_id, stage,
     ...(retryable ? { retryable: true } : {}) };
-  if (blocking && ["held", "refused", "unknown"].includes(stage)) localOutcomes[hint.event_id] = localAttempt;
+  if (blocking && [...TERMINAL_OUTCOMES, "unknown"].includes(stage)) localOutcomes[hint.event_id] = localAttempt;
   else delete localOutcomes[hint.event_id];
   if (accepted) {
     acceptedEventId = Math.max(acceptedEventId, hint.event_id);
@@ -681,7 +688,7 @@ async function processLocalHint($, hint) {
   const priorStage = localOutcomes[hint.event_id]?.stage;
   // A host refusal or hold is a decision, not an uncertainty: neither a real read
   // nor a replacement generation may rewrite it as consumption.
-  if (priorStage === "refused" || priorStage === "held") {
+  if (TERMINAL_OUTCOMES.includes(priorStage)) {
     await saveLocalAttempt($, hint, priorStage);
     return priorStage;
   }
@@ -721,7 +728,9 @@ async function processLocalHint($, hint) {
   submitAttempts += 1;
   let stage;
   try {
-    stage = classifySubmitResult(await $.prompt.submit({ text: payloadText(batch) }));
+    const nativeStage = await nativeSubmit($, hint, batch[0], payloadText(batch));
+    stage = nativeStage === null
+      ? classifySubmitResult(await $.prompt.submit({ text: payloadText(batch) })) : nativeStage;
   } catch (error) {
     // A thrown submit is uncertainty, never a refusal.
     stage = "unknown";
@@ -744,7 +753,7 @@ async function processLocalHint($, hint) {
   }
   pending = [];
   if (stage === "host-queued" || stage === "transport-written") submitOk += 1;
-  lastSubmitError = ["refused", "held", "unknown"].includes(stage) ? `local delivery ${stage}; no automatic resubmit` : "";
+  lastSubmitError = [...TERMINAL_OUTCOMES, "unknown"].includes(stage) ? `local delivery ${stage}; no automatic resubmit` : "";
   try {
     await saveLocalAttempt($, hint, stage, stage === "host-queued" || stage === "transport-written");
   } catch {
@@ -770,6 +779,43 @@ async function tickLog($, line) {
   } catch { /* diagnostics must never break delivery */ }
 }
 
+async function flushNativeReceipts($) {
+  for (const fact of drainNativeReceipts()) {
+    const index = nativeReceipts.findIndex(old => old.attempt_id === fact.attempt_id && old.generation === fact.generation);
+    if (index < 0) nativeReceipts.push(fact);
+    else if (!["refused", "expired", "failed", "inbox-consumed"].includes(nativeReceipts[index].stage)) {
+      // A newer queue-admission receipt can resolve an earlier unknown/held
+      // observation whose ACK was rejected. Do not let that older ACK starve it.
+      if (nativeReceipts[index].stage !== "host-queued" || fact.stage === "inbox-consumed") nativeReceipts[index] = fact;
+    }
+  }
+  while (nativeReceipts.length) {
+    const fact = nativeReceipts[0];
+    if (!localLease || fact.generation !== localLease.generation ||
+        fact.attempt_id !== localAttempt?.attempt_id || fact.event_id !== localAttempt?.event_id ||
+        ["refused", "expired", "failed", "inbox-consumed"].includes(localAttempt.stage)) {
+      nativeReceipts.shift();
+      continue;
+    }
+    if (localAttempt.stage === "host-queued" && fact.stage !== "host-queued") {
+      nativeReceipts.shift();
+      continue;
+    }
+    // Only a correlated receipt from the real native host can release a hold.
+    // No timer or alternative transport makes that decision.
+    await saveLocalAttempt($, fact, fact.stage, ["host-queued", "transport-written"].includes(fact.stage));
+    await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: fact.stage });
+    if (fact.stage === "host-queued") {
+      const cursor = await readMailboxCursor($, await baseUrl($));
+      if (cursor !== null && cursor >= fact.event_id) {
+        await saveLocalAttempt($, fact, "inbox-consumed");
+        await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: "inbox-consumed" });
+      }
+    }
+    nativeReceipts.shift();
+  }
+}
+
 async function localTick($) {
   await tickLog($, `tick busy=${localBusy} owned=${localOwned} lease=${localLease ? "yes" : "no"}`)
   if (!localOwned || localBusy) return;
@@ -778,6 +824,7 @@ async function localTick($) {
   let delay = 250;
   try {
     if (!localLease) await refreshLocalLease($);
+    await flushNativeReceipts($);
     // Throttled, idempotent rebind attempt: after a restart this re-attaches the
     // identity before the model needs get_inbox, so recovery needs no turn and
     // no manual /mcp. Steady state answers 409 binding_not_lost immediately.
@@ -866,6 +913,7 @@ async function localTick($) {
       delay = Math.min(5000, 500 * Math.max(1, localReconnects));
     }
   } finally {
+    try { await flushNativeReceipts($); } catch { localError = "native receipt pending acknowledgement; no fallback"; }
     localBusy = false;
     await tickLog($, `reschedule delay=${delay}`)
     if (localOwned && epoch === localEpoch) {
@@ -909,6 +957,9 @@ export function register(on, options) {
         void poll($);
       });
     }
+    // Native peers must be ready before Claude's first discovery/tool call.
+    // A missing native capability still leaves connected delivery available.
+    if (await $.env.get("CLAUDE_CODE_MESSAGING_SOCKET")) await poll($);
     // Register separately and in this order: a rejection of one command (a name
     // that collides, a host that forbids it) must not silently cost us the
     // diagnostic command, which is the only way to see what went wrong.
@@ -927,6 +978,17 @@ export function register(on, options) {
       }
     }
     return next(e);
+  });
+
+  on("session.end", async ($, e, next) => {
+    await stopNativeBridge($);
+    return next(e);
+  });
+  on("tool.call", { tool: "ListAgents" }, listNativePeers).catch(($, e, next) => next(e));
+  on("command.run", { command: ["list-agents", "peers"] }, listNativePeerCommand).catch(($, e, next) => next(e));
+  on("session.send", routeNativeSend).catch(($, e, next) => {
+    if (!String(e.to || "").startsWith("xats:")) return next(e);
+    return { isDelivered: false, reason: "xats native send outcome is unknown; do not resend or switch transports" };
   });
 
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
@@ -1073,6 +1135,7 @@ export function register(on, options) {
       `  pending:  ${pending.length}`,
       `  polls:    ${polls}`,
       `  local delivery: ${localOwned ? (localConnected ? "connected" : "reconnecting") : "polling"}${localError ? ` · ${localError}` : ""}`,
+      `  native peers: ${nativeBridgeState().ready ? "connected" : nativeBridgeState().selected ? "unavailable, no fallback" : "compatibility"} · ${nativeBridgeState().peers} peer(s)${nativeBridgeState().error ? ` · ${nativeBridgeState().error}` : ""}`,
       `  submit:   ${submitOk}/${submitAttempts} ok, ${submitFailures} consecutive failures`,
       `  retry:    ${nextSubmitAt ? `${Math.max(0, nextSubmitAt - Date.now())}ms` : "none"}`,
       `  submit error: ${lastSubmitError || "none"}`,
@@ -1122,6 +1185,8 @@ export const __internals = {
     team = value;
   },
   reset() {
+    __nativeInternals.reset();
+    nativeReceipts = [];
     localEpoch += 1;
     localOwned = false;
     localUnsupported = false;
