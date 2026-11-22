@@ -305,7 +305,7 @@ async function handleDeregister(ctx: RestCtx, req: FastifyRequest, reply: Fastif
   const data = parsed.data
   if (data.retain_mailbox) {
     if (!data.session_key) return reply.code(400).send({ error: 'session_key_required' })
-    const marked = ctx.agents.markClaudeSessionOffline(data.agent_id, data.session_key)
+    const marked = ctx.agents.markSessionOffline(data.agent_id, data.session_key)
     if (!marked) return reply.code(404).send({ error: 'unknown_agent' })
     ctx.claudeBind?.revoke(data.agent_id)
     new LocalDeliveryStore(ctx.db).revokeAgent(data.agent_id)

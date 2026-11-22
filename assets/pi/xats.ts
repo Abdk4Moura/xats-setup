@@ -234,7 +234,14 @@ export default function (pi: ExtensionAPI) {
     const id = agentId;
     agentId = null;
     ctx.ui.setStatus("xats", "");
-    if (id) await request("/api/deregister", { method: "POST", body: JSON.stringify({ agent_id: id }) }).catch(() => undefined);
+    if (id) await request("/api/deregister", {
+      method: "POST",
+      // Retain the durable identity and mailbox: a reload or resume must come
+      // back as the same agent_id, not a brand-new one. Without a session key
+      // there is nothing to prove ownership with, so keep the old delete path.
+      body: JSON.stringify({ agent_id: id, session_key: sessionKey ?? undefined,
+        retain_mailbox: Boolean(sessionKey) }),
+    }).catch(() => undefined);
   });
 
   // Themed card for the inbox notification. The model still receives the
