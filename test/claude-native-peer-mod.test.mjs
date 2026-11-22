@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { listNativePeers, listNativePeerCommand, routeNativeSend, nativeSubmit,
-  nativeBridgeState, drainNativeReceipts, __nativeInternals as internals } from '../assets/claude/mod/hooks/register.js'
+  nativeBridgeState, drainNativeReceipts, observeNativeReceive, __nativeInternals as internals } from '../assets/claude/mod/hooks/register.js'
 
 const agent = '11111111-1111-4111-8111-111111111111'
 const attempt = '22222222-2222-4222-8222-222222222222'
@@ -115,6 +115,41 @@ test('a written native frame without a receipt does not invent host queue admiss
     clock: { sleep: async () => {} } }
   assert.equal(await nativeSubmit($, hint, { from_agent_id: agent }, 'notice'), 'transport-written')
 })
+
+test('native admission is witnessed by the actual queued session.receive result, not a socket write', async () => {
+  const s = state()
+  const text = `fixture notice\n<xats-native-notice attempt="${attempt}" generation="1" event="7"/>`
+  s.requests.set(attempt, { attempt_id: attempt, generation: 1, event_id: 7, text })
+  internals.setState(s)
+  const writes = []
+  const $ = { fs: { write: async (file, value) => { writes.push({ file, value }) } } }
+  const queued = { text }
+  assert.equal(await observeNativeReceive($, { origin: { kind: 'peer' }, text }, async () => queued), queued)
+  const admission = writes.find(w => w.file.includes('/admissions/'))
+  assert.equal(JSON.parse(admission.value).admission_source, 'session.receive')
+  assert.equal(drainNativeReceipts()[0].stage, 'host-queued')
+})
+
+for (const outcome of ['held', 'consumed', 'wrong-origin', 'wrong-body', 'wrong-generation', 'terminal-refusal']) {
+  test(`native ${outcome} does not invent a queue-admission witness`, async () => {
+    const s = state()
+    const text = `fixture notice\n<xats-native-notice attempt="${attempt}" generation="1" event="7"/>`
+    s.requests.set(attempt, { attempt_id: attempt, generation: outcome === 'wrong-generation' ? 2 : 1, event_id: 7, text })
+    if (outcome === 'terminal-refusal') s.latest.set(attempt, { stage: 'refused' })
+    internals.setState(s)
+    const writes = []
+    const $ = { fs: { write: async (file, value) => { writes.push({ file, value }) } } }
+    const event = { origin: { kind: outcome === 'wrong-origin' ? 'unclassified' : 'peer' }, text }
+    const next = async () => {
+      if (outcome === 'held') throw new Error('host held this message')
+      return outcome === 'consumed' ? { consumed: 'not delivered' } : { text: outcome === 'wrong-body' ? 'unrelated' : text }
+    }
+    if (outcome === 'held') await assert.rejects(observeNativeReceive($, event, next), /held/)
+    else await observeNativeReceive($, event, next)
+    assert.equal(writes.some(w => w.file.includes('/admissions/')), false)
+    assert.deepEqual(drainNativeReceipts(), [])
+  })
+}
 
 test('native peer discovery rejects endpoints outside the owning helper namespace', () => {
   const s = state()

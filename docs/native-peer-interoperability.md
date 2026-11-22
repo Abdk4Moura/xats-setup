@@ -57,15 +57,37 @@ second submission method for that message.
   may have landed. Lost mailbox-commit responses stay unknown.
 - Native `delivered` after an inbound Claude send means the xats mailbox commit
   succeeded, not that Pi read it. A native `delivered` callback from Claude means
-  host queue admission, not model comprehension. Raw wire statuses are retained.
+  host queue admission, not model comprehension. Direct accepts do not normally
+  emit that positive wire callback. For those, the mod records admission only
+  after the documented `session.receive` continuation returns queued text matching
+  the exact outstanding notice, attempt, event and generation. This evidence is
+  labeled `admission_source: session.receive`; a `delivered` wire packet is never
+  fabricated. Socket writes alone remain `transport-written`.
 - Explicit host refusals and expirations are terminal. A held request changes
-  only after an actual correlated native host receipt, never a fallback timer.
+  only after a correlated real host receipt or queued host continuation, never a
+  fallback timer. A released hold wakes receipt reconciliation even while the
+  adapter is waiting for another daemon hint.
 - The existing local outbox, lease, generation fences, acknowledgement retries,
   and MCP inbox cursor remain authoritative. The native journal is a dispatch
   fence, not a second mailbox or an independent delivery owner.
 
 As with the existing same-user loopback API, this is not a sandbox against other
 processes running as the same operating-system user.
+
+## Acceptance scope
+
+CI requires actual native interoperability on Claude Code 2.1.295 and 2.1.330,
+with accept, refuse and hold/release profiles on each. Each fixture has its own
+HOME, native socket, loopback daemon and synthetic model endpoint. It exercises
+real `ListAgents`, `SendMessage`, native IPC and MCP inbox tools. The peer is a
+Pi-typed durable mailbox fixture, not a running Pi model.
+
+The refusal profile explicitly reads the inbox after refusal and requires the
+attempt to remain refused. The hold profile changes the fixture's trusted host
+policy, requires actual release without another dispatch, and then reads the
+inbox. Queue-admission evidence, one outbox attempt, and restart persistence are
+asserted separately. These are required gates, not a claim that a pending CI run
+has passed.
 
 ## Sources
 

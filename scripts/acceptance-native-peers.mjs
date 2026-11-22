@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
@@ -28,6 +28,11 @@ const modelCalls = [];
 const failures = [];
 const payload = 'native-claude-to-pi-fixture';
 const replyPayload = 'native-pi-to-claude-fixture';
+const policy = process.env.XATS_NATIVE_POLICY || 'accept';
+assert.ok(['accept', 'hold', 'refuse'].includes(policy));
+const userSettings = path.join(home, '.claude/settings.json');
+fs.mkdirSync(path.dirname(userSettings), { recursive: true, mode: 0o700 });
+fs.writeFileSync(userSettings, JSON.stringify({ crossSessionInbound: policy }), { mode: 0o600 });
 const env = { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: home, USERPROFILE: home,
   XDG_RUNTIME_DIR: runtime, TMPDIR: scratch, LANG: 'C.UTF-8', CI: '1',
   CROSS_AGENT_TEAMS_MCP_HOME: path.join(scratch, 'state'), ENABLE_TOOL_SEARCH: 'false',
@@ -41,6 +46,7 @@ let piId;
 let replyId;
 let sawNativeNotice = false;
 let sawReplyBody = false;
+let forceInboxRead = false;
 let requestCount = 0;
 let stdout = '';
 let stderr = '';
@@ -146,7 +152,7 @@ async function modelResponse(body) {
     replyId = reply.message_id;
     return { type: 'text', text: 'Native send completed; waiting for the mailbox reply notice.' };
   }
-  if (sawNativeNotice && !sawReplyBody) {
+  if ((sawNativeNotice || forceInboxRead) && !sawReplyBody) {
     const name = tools.find(t => t.name.endsWith('__get_inbox'))?.name;
     assert.ok(name, 'real inbox tool unavailable');
     return call(name, {});
@@ -163,6 +169,10 @@ async function stop(proc) {
 }
 
 try {
+  const versionResult = spawnSync(cli, ['--version'], { env, encoding: 'utf8', timeout: 5000, maxBuffer: 32768 });
+  assert.equal(versionResult.status, 0, 'pinned Claude must report its actual version');
+  const cliVersion = versionResult.stdout.trim().split(' ')[0];
+  if (process.env.XATS_NATIVE_EXPECT_VERSION) assert.equal(cliVersion, process.env.XATS_NATIVE_EXPECT_VERSION);
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
   env.XATS_BASE = base;
@@ -185,9 +195,9 @@ try {
   });
   await new Promise(resolve => model.listen(0, '127.0.0.1', resolve));
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${model.address().port}`;
-  const settings = { crossSessionInbound: 'accept', hooks: { SessionStart: [{ hooks: [{ type: 'command',
+  const settings = { hooks: { SessionStart: [{ hooks: [{ type: 'command',
     command: `"${process.execPath}" "${path.join(repo, 'assets/claude/xats-hook.mjs')}" start` }] }] } };
-  const args = ['--setting-sources', '', '--settings', JSON.stringify(settings), '--plugin-dir', path.join(repo, 'assets/claude/mod'),
+  const args = ['--setting-sources', 'user', '--settings', JSON.stringify(settings), '--plugin-dir', path.join(repo, 'assets/claude/mod'),
     '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: { 'cross-agent-teams': { type: 'http', url: base + '/mcp' } } }),
     '--tools', 'ListAgents,SendMessage', '--allowedTools', 'ListAgents,SendMessage,mcp__cross-agent-teams__*',
     '--permission-mode', 'dontAsk', '--no-session-persistence', '--model', 'sonnet', '--max-turns', '8',
@@ -198,22 +208,57 @@ try {
   claude.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [
     { type: 'text', text: 'Use the real native ListAgents and SendMessage tools to contact Pi, then read its reply notice.' },
   ] } }) + '\n');
-  await until(() => {
+  const alive = () => {
     if (claude.exitCode !== null) throw new Error(`Claude exited ${claude.exitCode} before native round trip: ${stderr.slice(-500)}`);
-    return sawReplyBody;
-  }, 45000);
+    return true;
+  };
+  await until(() => alive() && replyId);
   const db = new Database(dbPath, { readonly: true });
-  const rows = db.prepare('SELECT status,attempt_id,generation FROM local_delivery_outbox WHERE message_id=?').all(replyId);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].status, 'inbox-consumed');
-  const attempts = db.prepare('SELECT count(*) AS n FROM local_delivery_attempts WHERE message_id=?').get(replyId).n;
-  assert.equal(attempts, 1, 'native and plugin polling must not both own the same message');
+  const row = () => db.prepare('SELECT status,attempt_id,generation FROM local_delivery_outbox WHERE message_id=?').get(replyId);
   const nativeDirs = fs.readdirSync(path.join(home, '.xats/native'));
   assert.equal(nativeDirs.length, 1, 'one helper scope per real session');
   const journal = new Database(path.join(home, '.xats/native', nativeDirs[0], 'journal.db'), { readonly: true });
-  const nativeReply = journal.prepare('SELECT state FROM outgoing WHERE message=?').get(replyId);
-  assert.equal(nativeReply?.state, 'host-queued', 'native host receipt, not plugin submit, must prove admission');
+  const nativeFact = () => journal.prepare('SELECT state,wire_status,admission_source FROM outgoing WHERE message=?').get(replyId);
+  if (policy !== 'accept') {
+    const expected = policy === 'refuse' ? 'refused' : 'held';
+    await until(() => alive() && row()?.status === expected, 10000);
+    assert.equal(nativeFact()?.state, expected, 'real native refusal/hold must reach the durable journal');
+    assert.equal(nativeFact()?.admission_source, null, 'an undelivered held/refused message must not have a positive admission witness');
+    assert.equal(sawNativeNotice, false, 'held/refused traffic must not fall back to a prompt');
+    assert.equal(sawReplyBody, false);
+    if (policy === 'hold') {
+      // The fixture's trusted user settings are watched by the real host.
+      // Actual host policy release, never an adapter timer, admits this message.
+      fs.writeFileSync(userSettings, JSON.stringify({ crossSessionInbound: 'accept' }));
+    } else {
+      // An explicit test-user inbox read can cover a refused event without
+      // rewriting its terminal native attempt as consumed.
+      forceInboxRead = true;
+      claude.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [
+        { type: 'text', text: 'Explicitly read my xats inbox now. Do not submit or resend any message.' },
+      ] } }) + '\n');
+    }
+  }
+  await until(() => alive() && sawReplyBody, 45000);
+  const expectedFinal = policy === 'refuse' ? 'refused' : 'inbox-consumed';
+  await until(() => row()?.status === expectedFinal, 5000);
+  assert.equal(row()?.status, expectedFinal);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM local_delivery_outbox WHERE message_id=?').get(replyId).n, 1);
+  const attempts = db.prepare('SELECT count(*) AS n FROM local_delivery_attempts WHERE message_id=?').get(replyId).n;
+  assert.equal(attempts, 1, 'native and plugin polling must not both own the same message');
+  const nativeReply = await until(() => {
+    const fact = nativeFact();
+    return fact?.state === (policy === 'refuse' ? 'refused' : 'host-queued') && fact;
+  }, 5000);
+  if (policy !== 'refuse') assert.ok(nativeReply.admission_source === 'session.receive' || nativeReply.wire_status === 'delivered',
+    'a real queued host callback or native wire receipt, not a socket write, must prove admission');
+  else {
+    const facts = db.prepare('SELECT f.stage FROM local_delivery_facts f JOIN local_delivery_attempts a USING(attempt_id) WHERE a.message_id=?').all(replyId);
+    assert.ok(!facts.some(f => f.stage === 'inbox-consumed' || f.stage === 'host-queued'));
+    assert.equal(sawNativeNotice, false);
+  }
   assert.equal(journal.prepare("SELECT count(*) AS n FROM incoming WHERE state='stored'").get().n, 1);
+  const finalStatus = row()?.status;
   journal.close();
   db.close();
   await stop(claude);
@@ -223,12 +268,25 @@ try {
   const after = await request('/api/inbox?team=default&name=pi-native-fixture&since_event_id=0');
   assert.equal(after.messages.filter(m => m.body.includes(payload)).length, 1, 'native mailbox commit survives daemon restart exactly once');
   console.log(JSON.stringify({ realCli: true, syntheticModel: true, nativeListAgentsDiscoveredPi: true,
-    nativeSendMessageCommittedPiMailbox: true, nativeReplyReceipt: nativeReply.state,
-    inboxConsumedReply: sawReplyBody, attempts, daemonRestartPreservedMail: true,
+    nativeSendMessageCommittedPiMailbox: true, cliVersion, policy, nativeReplyObservation: nativeReply,
+    replyBodyReadByRealMcp: sawReplyBody, terminalRefusalPreserved: policy === 'refuse' ? finalStatus === 'refused' : undefined,
+    attempts, daemonRestartPreservedMail: true,
     featureFlagSpecified: false, calls: modelCalls, modelRequests: requestCount }, null, 2));
 } catch (error) {
-  console.error(JSON.stringify({ error: error.message, calls: modelCalls, modelRequests: requestCount,
-    failures, stderrTail: stderr.slice(-1200), stdoutTail: stdout.slice(-2000) }, null, 2));
+  const nativeDiagnostics = [];
+  const nativeRoot = path.join(home, '.xats/native');
+  for (const name of fs.existsSync(nativeRoot) ? fs.readdirSync(nativeRoot) : []) {
+    const folder = path.join(nativeRoot, name);
+    try {
+      const j = new Database(path.join(folder, 'journal.db'), { readonly: true });
+      const observed = path.join(folder, 'receive-observed.json');
+      nativeDiagnostics.push({ outgoing: j.prepare('SELECT attempt,generation,event,state,wire_status,admission_source FROM outgoing').all(),
+        hostCallback: fs.existsSync(observed) ? JSON.parse(fs.readFileSync(observed, 'utf8')) : null });
+      j.close();
+    } catch { /* startup may not have created a journal */ }
+  }
+  console.error(JSON.stringify({ error: error.message, policy, calls: modelCalls, modelRequests: requestCount,
+    failures, nativeDiagnostics, stderrTail: stderr.slice(-1200), stdoutTail: stdout.slice(-2000) }, null, 2));
   throw error;
 } finally {
   await stop(claude);

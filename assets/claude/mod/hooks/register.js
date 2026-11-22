@@ -91,7 +91,10 @@ async function runBridge($, state, request) {
           error = "";
         } else if (value.kind === "unavailable") {
           error = `native helper unavailable (${cleanLine(value.reason)})`;
-        } else receive(state, value);
+        } else {
+          receive(state, value);
+          if (value.kind === "receipt") scheduleNativeReceiptFlush($);
+        }
       }
     }
   } catch {
@@ -160,7 +163,9 @@ export async function nativeSubmit($, hint, message, text) {
   if (!UUID.test(hint.attempt_id) || !UUID.test(hint.message_id)) throw new Error("invalid native hint");
   const request = { attempt_id: hint.attempt_id, message_id: hint.message_id,
     generation: hint.generation, event_id: hint.event_id,
-    source_agent_id: message.from_agent_id, text };
+    source_agent_id: message.from_agent_id,
+    text: `New xats message from ${cleanLine(message.from_name || "peer")}\n${text}\n` +
+      `<xats-native-notice attempt="${hint.attempt_id}" generation="${hint.generation}" event="${hint.event_id}"/>` };
   state.requests.set(hint.attempt_id, request);
   const response = `${state.root}/responses/${hint.attempt_id}.json`;
   await $.fs.write(response, "");
@@ -211,6 +216,36 @@ export async function listNativePeerCommand($, e, next) {
     ? { ...original, text: `${original.text}\n\n${text}` } : original;
 }
 
+export async function observeNativeReceive($, e, next) {
+  // The public host callback resolves with text only once its native delivery
+  // entered the queue. A refused/held/consumed delivery does not prove that.
+  const queued = await next(e);
+  const state = bridge;
+  if (!state?.everReady) return queued;
+  if (String(e.text || "").includes("<xats-native-notice")) {
+    await $.fs.write(`${state.root}/receive-observed.json`, JSON.stringify({
+      origin: e.origin?.kind, result_type: typeof queued,
+      result_keys: queued && typeof queued === "object" ? Object.keys(queued) : [],
+      has_queued_text: typeof queued?.text === "string",
+    }) + "\n");
+  }
+  if (!["peer", "peer-send-message"].includes(e.origin?.kind) || typeof queued?.text !== "string") return queued;
+  const marker = /<xats-native-notice attempt="([0-9a-f-]{36})" generation="([0-9]+)" event="([0-9]+)"\/>/gi;
+  for (const match of queued.text.matchAll(marker)) {
+    const request = state.requests.get(match[1]);
+    if (!request || request.generation !== Number(match[2]) || request.event_id !== Number(match[3]) ||
+        !queued.text.includes(request.text)) continue;
+    const prior = state.latest.get(request.attempt_id)?.stage;
+    if (["refused", "expired", "failed", "inbox-consumed"].includes(prior)) continue;
+    const fact = { kind: "receipt", attempt_id: request.attempt_id, generation: request.generation,
+      event_id: request.event_id, stage: "host-queued", admission_source: "session.receive" };
+    await $.fs.write(`${state.root}/admissions/${request.attempt_id}.json`, JSON.stringify(fact) + "\n");
+    receive(state, fact);
+    scheduleNativeReceiptFlush($);
+  }
+  return queued;
+}
+
 export async function routeNativeSend($, e, next) {
   if (typeof e.to !== "string" || !e.to.startsWith("xats:")) return next(e);
   const peers = bridge?.ready ? bridge.peers : [];
@@ -230,6 +265,7 @@ export const __nativeInternals = {
 const MOD_BUILD = "2026-11-22-native-peer-v1";
 const TERMINAL_OUTCOMES = ["held", "refused", "expired", "failed"];
 let nativeReceipts = [];
+let nativeFlushPromise = null;
 
 let lastSessionID = "";
 let lastAgentsSeen = "none";
@@ -278,6 +314,7 @@ let localOwned = false;
 let localUnsupported = false;
 let localLease = null;
 let localBusy = false;
+let localWaiting = false;
 let localConnected = false;
 let localCanFallback = true;
 // Bounded re-arm/retry accounting: after a daemon restart the owner keeps
@@ -982,7 +1019,24 @@ async function tickLog($, line) {
   } catch { /* diagnostics must never break delivery */ }
 }
 
+function scheduleNativeReceiptFlush($) {
+  if (!localOwned || (localBusy && !localWaiting)) return;
+  $.clock.after(0, () => {
+    if (localOwned && (!localBusy || localWaiting)) {
+      void flushNativeReceipts($).catch(() => { localError = "native receipt pending acknowledgement; no fallback"; });
+    }
+  });
+}
+
 async function flushNativeReceipts($) {
+  if (nativeFlushPromise) return nativeFlushPromise;
+  const work = performNativeReceiptFlush($);
+  nativeFlushPromise = work;
+  try { await work; } finally { if (nativeFlushPromise === work) nativeFlushPromise = null; }
+}
+
+async function performNativeReceiptFlush($) {
+  const epoch = localEpoch;
   for (const fact of drainNativeReceipts()) {
     const index = nativeReceipts.findIndex(old => old.attempt_id === fact.attempt_id && old.generation === fact.generation);
     if (index < 0) nativeReceipts.push(fact);
@@ -994,25 +1048,38 @@ async function flushNativeReceipts($) {
   }
   while (nativeReceipts.length) {
     const fact = nativeReceipts[0];
-    if (!localLease || fact.generation !== localLease.generation ||
-        fact.attempt_id !== localAttempt?.attempt_id || fact.event_id !== localAttempt?.event_id ||
-        ["refused", "expired", "failed", "inbox-consumed"].includes(localAttempt.stage)) {
+    if (epoch !== localEpoch) return;
+    if (!localLease || fact.generation !== localLease.generation) {
       nativeReceipts.shift();
       continue;
     }
-    if (localAttempt.stage === "host-queued" && fact.stage !== "host-queued") {
+    const lease = { ...localLease };
+    const current = fact.attempt_id === localAttempt?.attempt_id && fact.event_id === localAttempt?.event_id;
+    if (current && (["refused", "expired", "failed"].includes(localAttempt.stage) ||
+        (localAttempt.stage === "host-queued" && !["host-queued", "inbox-consumed"].includes(fact.stage)))) {
       nativeReceipts.shift();
       continue;
     }
-    // Only a correlated receipt from the real native host can release a hold.
-    // No timer or alternative transport makes that decision.
-    await saveLocalAttempt($, fact, fact.stage, ["host-queued", "transport-written"].includes(fact.stage));
-    await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: fact.stage });
-    if (fact.stage === "host-queued") {
-      const cursor = await readMailboxCursor($, await baseUrl($));
+    // A late receipt still belongs to its original attempt. It must not replace
+    // a newer cursor journal, or be stamped with replacement credentials.
+    if (current && localAttempt.stage !== "inbox-consumed") {
+      await saveLocalAttempt($, fact, fact.stage, ["host-queued", "transport-written"].includes(fact.stage));
+    }
+    try {
+      await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: fact.stage }, lease);
+    } catch (error) {
+      if ([404, 409, 410].includes(error?.status)) { nativeReceipts.shift(); continue; }
+      throw error;
+    }
+    if (epoch !== localEpoch) return;
+    if (current && fact.stage === "host-queued") {
+      const base = await baseUrl($);
+      if (epoch !== localEpoch) return;
+      const cursor = await readMailboxCursor($, base);
+      if (epoch !== localEpoch) return;
       if (cursor !== null && cursor >= fact.event_id) {
         await saveLocalAttempt($, fact, "inbox-consumed");
-        await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: "inbox-consumed" });
+        await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: "inbox-consumed" }, lease);
       }
     }
     nativeReceipts.shift();
@@ -1034,7 +1101,10 @@ async function localTick($) {
     if (!localAck) {
       let data;
       try {
-        data = await localRequest($, "wait?timeout_ms=20000");
+        localWaiting = true;
+        try { data = await localRequest($, "wait?timeout_ms=20000"); }
+        finally { localWaiting = false; }
+        await flushNativeReceipts($);
       } catch (error) {
         // Only explicit unsupported capability BEFORE a successful wait can
         // choose polling. Auth errors and uncertain waits retain ownership.
@@ -1116,7 +1186,9 @@ async function localTick($) {
       delay = Math.min(5000, 500 * Math.max(1, localReconnects));
     }
   } finally {
-    try { await flushNativeReceipts($); } catch { localError = "native receipt pending acknowledgement; no fallback"; }
+    if (epoch === localEpoch) {
+      try { await flushNativeReceipts($); } catch { localError = "native receipt pending acknowledgement; no fallback"; }
+    }
     localBusy = false;
     await tickLog($, `reschedule delay=${delay}`)
     if (localOwned && epoch === localEpoch) {
@@ -1189,6 +1261,7 @@ export function register(on, options) {
   });
   on("tool.call", { tool: "ListAgents" }, listNativePeers).catch(($, e, next) => next(e));
   on("command.run", { command: ["list-agents", "peers"] }, listNativePeerCommand).catch(($, e, next) => next(e));
+  on("session.receive", observeNativeReceive).catch(($, e, next) => next(e));
   on("session.send", routeNativeSend).catch(($, e, next) => {
     if (!String(e.to || "").startsWith("xats:")) return next(e);
     return { isDelivered: false, reason: "xats native send outcome is unknown; do not resend or switch transports" };
@@ -1390,6 +1463,8 @@ export const __internals = {
   reset() {
     __nativeInternals.reset();
     nativeReceipts = [];
+    nativeFlushPromise = null;
+    localWaiting = false;
     localEpoch += 1;
     localOwned = false;
     localUnsupported = false;

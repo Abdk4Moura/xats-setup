@@ -63,6 +63,17 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(self.journal.record_outgoing(self.request['attempt_id'], 'host-queued', 'delivered')['stage'], 'host-queued')
         self.assertEqual(self.journal.record_outgoing(self.request['attempt_id'], 'transport-written')['stage'], 'host-queued')
 
+    def test_host_api_admission_is_distinct_from_a_wire_receipt(self):
+        self.journal.prepare_outgoing(self.request)
+        self.journal.begin_write(self.request['attempt_id'])
+        self.journal.record_outgoing(self.request['attempt_id'], 'transport-written')
+        fact = self.journal.record_outgoing(self.request['attempt_id'], 'host-queued', admission='session.receive')
+        self.assertEqual(fact['admission_source'], 'session.receive')
+        self.assertIsNone(fact['wire_status'], 'do not fabricate a delivered wire packet')
+        fact = self.journal.record_outgoing(self.request['attempt_id'], 'host-queued', raw='delivered')
+        self.assertEqual(fact['wire_status'], 'delivered')
+        self.assertEqual(fact['admission_source'], 'session.receive')
+
     def test_attempt_id_cannot_be_reused_with_changed_body(self):
         self.journal.prepare_outgoing(self.request)
         with self.assertRaisesRegex(ValueError, 'different_input'):

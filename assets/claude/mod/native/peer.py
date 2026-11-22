@@ -104,7 +104,7 @@ class Journal:
           CREATE TABLE IF NOT EXISTS outgoing (
             attempt TEXT PRIMARY KEY, message TEXT NOT NULL, generation INTEGER NOT NULL,
             event INTEGER NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL,
-            wire_status TEXT, wire_detail TEXT);
+            wire_status TEXT, wire_detail TEXT, admission_source TEXT);
           CREATE TABLE IF NOT EXISTS incoming (
             key TEXT PRIMARY KEY, target TEXT NOT NULL, digest TEXT NOT NULL,
             state TEXT NOT NULL, xats_id TEXT);
@@ -139,7 +139,7 @@ class Journal:
         with self.db:
             if previous and previous[0] == 'prepared':
                 self.db.execute("UPDATE outgoing SET state='superseded' WHERE message=? AND state='prepared'", (request['message_id'],))
-            self.db.execute('INSERT INTO outgoing VALUES(?,?,?,?,?,?,NULL,NULL)',
+            self.db.execute('INSERT INTO outgoing VALUES(?,?,?,?,?,?,NULL,NULL,NULL)',
                             (aid, request['message_id'], request['generation'], request['event_id'], digest, state))
         return fresh, state
 
@@ -149,14 +149,15 @@ class Journal:
                                    (attempt,)).rowcount == 1
 
     def outgoing_fact(self, attempt):
-        row = self.db.execute('SELECT generation,event,state,wire_status,wire_detail FROM outgoing WHERE attempt=?',
+        row = self.db.execute('SELECT generation,event,state,wire_status,wire_detail,admission_source FROM outgoing WHERE attempt=?',
                               (attempt,)).fetchone()
         if not row:
             return None
         return dict(kind='receipt', attempt_id=attempt, generation=row[0], event_id=row[1],
-                    stage='unknown' if row[2] == 'superseded' else row[2], wire_status=row[3], wire_detail=row[4])
+                    stage='unknown' if row[2] == 'superseded' else row[2], wire_status=row[3], wire_detail=row[4],
+                    admission_source=row[5])
 
-    def record_outgoing(self, attempt, stage, raw=None, detail=None):
+    def record_outgoing(self, attempt, stage, raw=None, detail=None, admission=None):
         if stage not in STAGES:
             raise ValueError('invalid_stage')
         old = self.outgoing_fact(attempt)
@@ -164,11 +165,13 @@ class Journal:
             return None
         if old['stage'] in TERMINAL or old['stage'] == 'inbox-consumed':
             return old
-        if old['stage'] == 'host-queued' and stage not in TERMINAL and stage != 'inbox-consumed':
+        if old['stage'] == 'host-queued' and stage not in TERMINAL and stage not in ('host-queued', 'inbox-consumed'):
             return old
         with self.db:
-            self.db.execute('UPDATE outgoing SET state=?,wire_status=?,wire_detail=? WHERE attempt=?',
-                            (stage, raw, detail, attempt))
+            self.db.execute('UPDATE outgoing SET state=?,wire_status=?,wire_detail=?,admission_source=? WHERE attempt=?',
+                            (stage, old['wire_status'] if raw is None else raw,
+                             old['wire_detail'] if raw is None else detail,
+                             admission or old['admission_source'], attempt))
         return self.outgoing_fact(attempt)
 
     def forward_incoming(self, frame, target, observed, expected, reply_path, route):
@@ -211,6 +214,7 @@ class Bridge:
         self.lock = owner_lock(self.root)
         self.requests = private_directory(self.root / 'requests')
         self.responses = private_directory(self.root / 'responses')
+        self.admissions = private_directory(self.root / 'admissions')
         self.owner_socket = Path(args.socket)
         info = self.owner_socket.lstat()
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
@@ -351,6 +355,26 @@ class Bridge:
             self.dispatch(request)
             path.unlink(missing_ok=True)
 
+    def scan_admissions(self):
+        # Direct accepts do not have a native positive wire callback. The mod
+        # reports the documented session.receive result, correlated with the
+        # exact outstanding text, attempt, event and generation.
+        for path in self.admissions.iterdir():
+            if path.suffix != '.json' or not UUID.fullmatch(path.stem) or path.is_symlink():
+                continue
+            try:
+                if path.stat().st_size > 16384:
+                    continue
+                fact = json.loads(path.read_text())
+            except (ValueError, OSError):
+                continue
+            old = self.journal.outgoing_fact(path.stem)
+            if (old and fact.get('attempt_id') == path.stem and fact.get('generation') == old['generation']
+                    and fact.get('event_id') == old['event_id'] and fact.get('stage') == 'host-queued'
+                    and fact.get('admission_source') == 'session.receive'):
+                self.response(self.journal.record_outgoing(path.stem, 'host-queued', admission='session.receive'))
+            path.unlink(missing_ok=True)
+
     def route(self, target, content):
         result = self.bus.request('/api/send', dict(
             **{'from': dict(name=self.source['name'], team=self.source['team'])},
@@ -416,6 +440,7 @@ class Bridge:
                 except (OSError, ValueError):
                     self.emit(dict(kind='diagnostic', reason='native_connection_rejected'))
             self.scan_requests()
+            self.scan_admissions()
             now = time.monotonic()
             if now >= next_refresh:
                 try:
