@@ -157,11 +157,16 @@ export default Plugin.define({
       return task
     }
 
-    async function deregister(state: AgentSession): Promise<void> {
+    async function deregister(state: AgentSession, { retain = false }: { retain?: boolean } = {}): Promise<void> {
       const id = state.agentID
       state.agentID = null
       if (!id) return
-      try { await jsonRequest(`${XATS_BASE}/api/deregister`, post({ agent_id: id })) } catch { /* reaper handles stale rows */ }
+      // Extension unload/reload keeps the durable row so this session comes back
+      // as the same agent_id. A deleted or relocated session really is gone.
+      const body = retain && state.sessionID
+        ? { agent_id: id, session_key: state.sessionID, retain_mailbox: true }
+        : { agent_id: id }
+      try { await jsonRequest(`${XATS_BASE}/api/deregister`, post(body)) } catch { /* reaper handles stale rows */ }
     }
 
     async function getAgents(targetTeam: string): Promise<XatsAgent[]> {
@@ -397,7 +402,7 @@ export default Plugin.define({
       clearInterval(heartbeat)
       clearInterval(receive)
       eventController.abort()
-      for (const state of agents.values()) await deregister(state)
+      for (const state of agents.values()) await deregister(state, { retain: true })
       agents.clear()
       try { db?.close() } catch { /* ignore */ }
     }

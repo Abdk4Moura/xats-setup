@@ -124,6 +124,8 @@ test('SessionEnd deregisters the agent it registered', async (t) => {
   const deregister = bus.calls.find((call) => call.url?.startsWith('/api/deregister'));
   assert.ok(deregister, 'deregister was called');
   assert.equal(deregister.body.agent_id, 'agt_codex_1');
+  assert.equal(deregister.body.session_key, sid, 'a reload must be attributable to this session');
+  assert.equal(deregister.body.retain_mailbox, true, 'the durable identity and mailbox are kept');
 });
 
 test('a dead daemon never breaks the session', async () => {
