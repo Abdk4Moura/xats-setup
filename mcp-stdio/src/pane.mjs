@@ -15,6 +15,9 @@ function ttyOf(pid) {
 }
 
 export function tmuxBinding(env = process.env, ppid = process.ppid) {
+  // XATS_PANE=0 keeps a host keystroke-free even inside tmux: its mail then
+  // waits in the durable inbox instead of being typed into a composer.
+  if (String(env.XATS_PANE || '').trim() === '0') return undefined
   if (process.platform !== 'linux') return undefined
   const pane = String(env.TMUX_PANE || '').trim()
   if (!/^%\d+$/.test(pane)) return undefined
