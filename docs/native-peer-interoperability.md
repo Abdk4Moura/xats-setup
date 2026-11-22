@@ -48,7 +48,10 @@ second submission method for that message.
 - The helper accepts native traffic only from its explicitly bound Claude
   process, checking kernel PID/UID and process-start evidence as well as the
   session's exact reply address.
-- Native endpoints are private, mailbox-specific sockets. Discovery is extended
+- Native endpoints are private, mailbox-specific sockets in the host's own
+  socket directory, where native policy callbacks can vet them. Their filenames
+  are bound to the owner/helper process and mailbox. Cleanup removes only the
+  helper's sockets, never Claude's shared namespace. Discovery is extended
   through documented mod hooks, not private Claude session-registry writes.
 - The host-exported messaging token is inherited from the owning session where
   available. It is never taken from peer-key files, journaled, logged, or listed.

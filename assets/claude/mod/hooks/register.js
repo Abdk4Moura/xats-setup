@@ -36,8 +36,9 @@ function peerLabel(peer) {
 
 function validPeer(peer, state) {
   return peer && UUID.test(peer.agent_id) && typeof peer.name === "string" &&
-    typeof peer.address === "string" && peer.address.startsWith(`uds:${state.socketRoot}/`) &&
-    peer.address.endsWith(`/${state.pid}.sock`) && !peer.address.includes("..") &&
+    typeof peer.address === "string" &&
+    peer.address === `uds:${state.socketRoot}-${peer.agent_id.replace(/-/g, "").toLowerCase().slice(0, 12)}.sock` &&
+    !peer.address.includes("..") &&
     !/[\x00-\x1f]/.test(peer.address);
 }
 

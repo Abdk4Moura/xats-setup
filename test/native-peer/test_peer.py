@@ -152,6 +152,35 @@ class JournalTests(unittest.TestCase):
         second = peer.owner_lock(folder)
         os.close(second)
 
+    def test_mailbox_sockets_are_vetted_siblings_and_cleanup_keeps_host_namespace(self):
+        # Short socket paths, with the durable journal on the test's disk root.
+        with tempfile.TemporaryDirectory(prefix='xn-', dir='/tmp') as scratch:
+            namespace = Path(scratch) / 'r'
+            namespace.mkdir(mode=0o700)
+            owner_path = namespace / f'{os.getpid()}.sock'
+            owner = socket.socket(socket.AF_UNIX)
+            owner.bind(str(owner_path))
+            bridge = None
+            try:
+                args = peer.argparse.Namespace(state_dir=Path(self.temporary.name) / 'bridge',
+                    socket=owner_path, agent_id=str(uuid.uuid4()), base='http://127.0.0.1:9')
+                bridge = peer.Bridge(args)
+                endpoint = bridge.endpoint(self.target)
+                self.assertEqual(endpoint.parent, owner_path.parent,
+                    'native policy callbacks do not accept nested socket directories')
+                self.assertTrue(endpoint.name.endswith(self.target.replace('-', '')[:12] + '.sock'))
+                self.assertEqual(endpoint.stat().st_mode & 0o777, 0o600)
+                owner.close()
+                owner_path.unlink()
+                bridge.close()
+                bridge = None
+                self.assertTrue(namespace.is_dir(), 'the helper must never delete Claude\'s namespace')
+                self.assertFalse(endpoint.exists())
+            finally:
+                if bridge:
+                    bridge.close()
+                owner.close()
+
     def test_real_unix_socket_reports_the_connecting_process(self):
         path = str(Path(self.temporary.name) / 'test.sock')
         with socket.socket(socket.AF_UNIX) as listener, socket.socket(socket.AF_UNIX) as client:

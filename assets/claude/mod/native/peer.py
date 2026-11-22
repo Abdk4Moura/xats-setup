@@ -224,9 +224,10 @@ class Bridge:
         parent = self.owner_socket.parent.lstat()
         if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o022:
             raise ValueError('native_socket_directory_unverified')
-        # Keep sockets near the already viable native socket, not under a long
-        # HOME/state path that can exceed Unix's 108-byte address limit.
-        self.sockets = private_directory(self.owner_socket.parent / f'xats-{self.owner_pid}-{os.getpid()}')
+        # Native policy receipts require direct siblings of the owner's inbox.
+        # The private host directory and helper-bound filename stem scope these
+        # endpoints without inventing native registry entries.
+        self.sockets = self.owner_socket.parent / f'xats-{self.owner_pid}-{os.getpid()}'
         self.agent = args.agent_id
         self.bus = Bus(args.base)
         self.journal = Journal(self.root / 'journal.db')
@@ -243,8 +244,7 @@ class Bridge:
         if agent_id in self.endpoints:
             return self.endpoints[agent_id][1]
         # One real process, separate endpoints per durable xats mailbox.
-        folder = private_directory(self.sockets / hashlib.sha256(agent_id.encode()).hexdigest()[:12])
-        path = folder / f'{os.getpid()}.sock'
+        path = self.sockets.with_name(self.sockets.name + '-' + agent_id.replace('-', '').lower()[:12] + '.sock')
         if len(os.fsencode(path)) > 103:
             raise ValueError('native_socket_path_too_long')
         listener = socket.socket(socket.AF_UNIX)
@@ -457,14 +457,7 @@ class Bridge:
             self.selector.unregister(listener)
             listener.close()
             path.unlink(missing_ok=True)
-            try:
-                path.parent.rmdir()
-            except OSError:
-                pass
-        try:
-            self.sockets.rmdir()
-        except OSError:
-            pass
+        # The namespace belongs to Claude, not this helper. Never remove it.
         self.selector.close()
         (self.root / f'stop-{os.getpid()}').unlink(missing_ok=True)
         self.journal.db.close()

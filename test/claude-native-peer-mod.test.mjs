@@ -7,7 +7,7 @@ const agent = '11111111-1111-4111-8111-111111111111'
 const attempt = '22222222-2222-4222-8222-222222222222'
 const message = '33333333-3333-4333-8333-333333333333'
 const root = '/home/test/.xats/native/owned-session'
-const peer = { agent_id: agent, name: 'pi-worker', ref: '1234', agent_type: 'pi', address: `uds:${root}/peers/abc/321.sock` }
+const peer = { agent_id: agent, name: 'pi-worker', ref: '1234', agent_type: 'pi', address: `uds:${root}/peers-${agent.replace(/-/g, '').slice(0, 12)}.sock` }
 function state(options = {}) {
   return { ready: true, everReady: true, closed: false, root, socketRoot: root + '/peers', pid: 321, peers: [peer], rawPeers: [],
     requests: new Map(), latest: new Map(), receipts: [], ...options }
