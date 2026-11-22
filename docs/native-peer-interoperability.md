@@ -107,6 +107,12 @@ and then reads the inbox. Queue-admission evidence, one outbox attempt, and rest
 asserted separately. These are required gates, not a claim that a pending CI run
 has passed.
 
+## Delivery transport
+
+Delivery hints, not bodies, reach a session. Pi holds a stream, Claude Code
+long-polls the same lease, and Antigravity is woken through a bound tmux pane.
+See [transports](transports.md) for the invariants and why each harness differs.
+
 ## Sources
 
 - [Claude cross-session messaging and exported inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket)

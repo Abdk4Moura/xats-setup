@@ -311,3 +311,21 @@ test('local lease registration rejects arbitrary kinds and unkeyed identities', 
   const missing = await f.post('/api/register', { name: 'unkeyed', agent_type: 'claude-code', local_delivery: true })
   assert.equal(missing.status, 400)
 })
+
+test('a newer stream for one lease supersedes the older connection', { skip: !deps, timeout: 20000 }, async t => {
+  const f = await fixture(t)
+  const base = await f.app.listen({ port: 0, host: '127.0.0.1' })
+  const headers = { 'x-xats-delivery-token': f.token }
+  const first = await fetch(`${base}/api/local-delivery/events`, { headers })
+  const firstReader = first.body.getReader()
+  assert.equal(first.status, 200)
+  const second = await fetch(`${base}/api/local-delivery/events`, { headers })
+  assert.equal(second.status, 200)
+  // The superseded connection ends rather than lingering and double-claiming.
+  const closed = await Promise.race([
+    firstReader.read().then(() => firstReader.read()).then(r => r.done, () => true),
+    new Promise(r => setTimeout(() => r(false), 4000)),
+  ])
+  await second.body.cancel().catch(() => {})
+  assert.equal(closed, true, 'the older stream is closed')
+})
