@@ -43,3 +43,10 @@ test('without a host conversation id there is exactly one identity per box', () 
   assert.equal(pinned.name, 'agy-box-root')
   assert.equal(pinnedCall('register_agent', {}, 'agy-box-root', { 'antigravity.google/root_conversation_id': undefined }).name, 'agy-box-root')
 })
+
+test('registration uses the configured team, not the model-derived one', () => {
+  const pinned = pinnedCall('register_agent', { team: 'root' }, 'agy-box-root', {}, 'default')
+  assert.equal(pinned.team, 'default')
+  assert.equal(pinnedCall('register_agent', { team: 'root' }, 'agy-box-root', {}).team, 'root',
+    'no configured team leaves the host value alone')
+})

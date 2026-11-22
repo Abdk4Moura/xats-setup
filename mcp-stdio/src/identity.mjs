@@ -31,11 +31,15 @@ export function instanceSuffix(meta) {
   return key ? createHash('sha256').update(key).digest('hex').slice(0, 8) : undefined
 }
 
-export function pinIdentity(name, args = {}) {
+export function pinIdentity(name, args = {}, team) {
   if (typeof name !== 'string' || !name.trim()) return args
   return {
     ...args,
     name: name.trim(),
+    // The agent model derives a team from its working directory, which would
+    // hide every other harness on this box from list_agents. The configured
+    // team keeps one roster.
+    ...(typeof team === 'string' && team.trim() ? { team: team.trim() } : {}),
     // The registration tool has no name_mode: without a session key the daemon
     // treats (device, team, name) as one durable identity, so the same pinned
     // name always resolves to the same agent_id. Never invent a suffix.
@@ -45,10 +49,10 @@ export function pinIdentity(name, args = {}) {
 }
 
 /** Apply the pinned identity only to the registration call. */
-export function pinnedCall(tool, args, name, meta) {
+export function pinnedCall(tool, args, name, meta, team) {
   if (tool !== 'register_agent') return args ?? {}
   const suffix = instanceSuffix(meta)
   // Without a host-provided conversation id there is exactly one identity for
   // this host: multiple instances would then share it, so say so in the docs.
-  return pinIdentity(suffix ? `${name}-${suffix}` : name, args ?? {})
+  return pinIdentity(suffix ? `${name}-${suffix}` : name, args ?? {}, team)
 }

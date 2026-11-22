@@ -30,6 +30,9 @@ const VERSION = '0.1.0'
 const DEFAULT_PORT = 9100
 // Host-pinned durable identity (Antigravity and other stdio-only clients).
 const PINNED_NAME = (process.env.XATS_NAME || '').trim()
+// One roster across harnesses: the model would otherwise pick a team from the
+// working directory and see only itself.
+const PINNED_TEAM = (process.env.XATS_TEAM || 'default').trim()
 
 function resolveDaemonUrl() {
   const explicit = process.env.XATS_MCP_URL
@@ -78,7 +81,7 @@ async function main() {
     server.setRequestHandler(CallToolRequestSchema, async (request) =>
       client.callTool({ name: request.params.name,
         arguments: pinnedCall(request.params.name, request.params.arguments, PINNED_NAME,
-          request.params._meta) }))
+          request.params._meta, PINNED_TEAM) }))
   }
 
   if (capabilities.resources) {
