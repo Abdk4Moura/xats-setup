@@ -10,6 +10,7 @@ the inherited environment, never in the journal, tool listing, or stdout.
 import argparse
 import fcntl
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
@@ -204,6 +205,17 @@ class Journal:
         return state, xid
 
 
+def native_content(request, reply_path):
+    if request.get('delivery') != 'body':
+        return request['text']
+    # Honest xats mailbox attribution. Do not claim a Claude identity or assert
+    # a Claude permission mode on behalf of a non-Claude peer.
+    sender = html.escape('xats:' + str(request.get('source_name') or 'peer'), quote=True)
+    address = html.escape('uds:' + str(reply_path), quote=True)
+    return (f'<cross-session-message from="{address}" from-name="{sender}">\n'
+            + request['text'] + '\n</cross-session-message>')
+
+
 class Bridge:
     def __init__(self, args):
         if sys.platform != 'linux' or not hasattr(socket, 'SO_PEERCRED'):
@@ -331,7 +343,7 @@ class Bridge:
             return
         try:
             frame = dict(type='user', msg_id=aid, uuid=str(uuid.uuid4()), from_plugin='xats',
-                         priority='next', message=dict(role='user', content=request['text']))
+                         priority='next', message=dict(role='user', content=native_content(request, reply_path)))
             self.write_native(frame, reply_path)
             fact = self.journal.record_outgoing(aid, 'transport-written')
         except Exception:

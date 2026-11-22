@@ -100,7 +100,7 @@ for (const stage of ['host-queued', 'held', 'refused', 'expired', 'failed', 'unk
     const writes = []
     const $ = { fs: { write: async (file, value) => { writes.push({ file, value }) },
       read: async () => JSON.stringify({ ...hint, stage }) }, clock: { sleep: async () => {} } }
-    assert.equal(await nativeSubmit($, hint, { from_agent_id: agent }, 'notice'), stage)
+    assert.equal(await nativeSubmit($, hint, { from_agent_id: agent, body: 'full native body' }, 'notice'), stage)
     assert.equal(writes.length, 2)
     assert.equal(writes[0].value, '')
     assert.equal(JSON.parse(writes[1].value).source_agent_id, agent)
@@ -113,7 +113,41 @@ test('a written native frame without a receipt does not invent host queue admiss
   const hint = { attempt_id: attempt, message_id: message, generation: 1, event_id: 7 }
   const $ = { fs: { write: async () => {}, read: async () => JSON.stringify({ ...hint, stage: 'transport-written' }) },
     clock: { sleep: async () => {} } }
-  assert.equal(await nativeSubmit($, hint, { from_agent_id: agent }, 'notice'), 'transport-written')
+  assert.equal(await nativeSubmit($, hint, { from_agent_id: agent, body: 'full native body' }, 'notice'), 'transport-written')
+})
+
+for (const mode of [undefined, 'notice']) test(`native payload mode ${mode ?? 'default'} preserves body-first behavior`, async () => {
+  internals.setState(state())
+  const hint = { attempt_id: attempt, message_id: message, generation: 1, event_id: 7 }
+  const writes = []
+  const $ = { env: { get: async () => mode }, fs: {
+    write: async (file, value) => writes.push({ file, value }),
+    read: async () => JSON.stringify({ ...hint, stage: 'host-queued' }),
+  } }
+  const body = 'Actual reply body, delivered without an MCP fetch.\nSecond line.'
+  await nativeSubmit($, hint, { from_agent_id: agent, from_name: 'Pi', body }, '<xats-inbox>Call get_inbox</xats-inbox>')
+  const request = JSON.parse(writes[1].value)
+  assert.equal(request.delivery, mode === 'notice' ? 'notice' : 'body')
+  if (mode === 'notice') assert.match(request.text, /Call get_inbox/)
+  else {
+    assert.ok(request.text.includes(body))
+    assert.doesNotMatch(request.text, /Call get_inbox|<xats-inbox>/)
+    assert.equal(request.source_name, 'Pi')
+  }
+})
+
+test('a quoted correlation tag cannot release another held native message', async () => {
+  const s = state()
+  const oldText = `old held body\n<xats-native-notice attempt="${attempt}" generation="1" event="7"/>`
+  const newText = `${oldText}\nNew body quoting the old notice.\n<xats-native-notice attempt="${message}" generation="1" event="8"/>`
+  s.requests.set(attempt, { attempt_id: attempt, generation: 1, event_id: 7, text: oldText })
+  s.requests.set(message, { attempt_id: message, generation: 1, event_id: 8, text: newText })
+  s.latest.set(attempt, { stage: 'held' })
+  internals.setState(s)
+  const $ = { fs: { write: async () => {} } }
+  await observeNativeReceive($, { origin: { kind: 'peer' }, text: newText }, async () => ({ text: newText }))
+  assert.deepEqual(drainNativeReceipts().map(r => r.attempt_id), [message])
+  assert.equal(s.latest.get(attempt).stage, 'held')
 })
 
 test('native admission is witnessed by the actual queued session.receive result, not a socket write', async () => {

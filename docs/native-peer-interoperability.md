@@ -17,9 +17,13 @@ A native endpoint represents an xats mailbox, not a fabricated Claude session.
 Pi and Antigravity continue using their normal xats integrations. The bridge
 receives native Claude traffic and commits it to the addressed mailbox before
 returning a native admission receipt. Their replies remain durable xats mail;
-Claude's leased arrival adapter submits the notice through the native inbox
-socket instead of `prompt.submit`. The notice points to the full inbox content,
-so the body is not injected once natively and again through an automatic read.
+Claude's leased arrival adapter delivers the full message body through the
+native inbox socket, with an honestly labeled `xats:` peer envelope. It does not
+inject an `<xats-inbox>` notification or ask Claude to fetch that body again.
+Native host admission is not treated as a canonical MCP read receipt.
+
+`XATS_NATIVE_DELIVERY=notice` selects the older native-notification/MCP-fetch
+behavior for compatibility. Unset means full native body delivery.
 
 Stock Claude sessions without the xats mod do not gain the additional discovery
 section. Native Claude-only peer entries remain unchanged.

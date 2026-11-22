@@ -29,8 +29,8 @@ const failures = [];
 const payload = 'native-claude-to-pi-fixture';
 const replyPayload = 'native-pi-to-claude-fixture';
 const profile = process.env.XATS_NATIVE_POLICY || 'accept';
-assert.ok(['accept', 'hold', 'refuse', 'restart-refuse'].includes(profile));
-const policy = profile === 'restart-refuse' ? 'hold' : profile;
+assert.ok(['accept', 'hold', 'refuse', 'restart-refuse', 'body'].includes(profile));
+const policy = profile === 'restart-refuse' ? 'hold' : profile === 'body' ? 'accept' : profile;
 const refuses = profile === 'refuse' || profile === 'restart-refuse';
 const userSettings = path.join(home, '.claude/settings.json');
 fs.mkdirSync(path.dirname(userSettings), { recursive: true, mode: 0o700 });
@@ -39,7 +39,8 @@ const env = { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: ho
   XDG_RUNTIME_DIR: runtime, TMPDIR: scratch, LANG: 'C.UTF-8', CI: '1',
   CROSS_AGENT_TEAMS_MCP_HOME: path.join(scratch, 'state'), ENABLE_TOOL_SEARCH: 'false',
   ANTHROPIC_API_KEY: 'native-local-fixture-not-a-real-key',
-  DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
+  DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+  ...(profile === 'body' ? {} : { XATS_NATIVE_DELIVERY: 'notice' }) };
 let daemon;
 let claude;
 let model;
@@ -125,7 +126,7 @@ async function modelResponse(body) {
   const lastUser = [...messages].reverse().find(m => m.role === 'user');
   const lastText = text(lastUser?.content);
   if (lastText.includes('<xats-inbox>')) sawNativeNotice = true;
-  if (results.some(r => r.includes(replyPayload))) sawReplyBody = true;
+  if (results.some(r => r.includes(replyPayload)) || (profile === 'body' && lastText.includes(replyPayload))) sawReplyBody = true;
   const call = (name, input) => {
     assert.ok(tools.some(t => t.name === name), `required real tool not offered: ${name}`);
     modelCalls.push(name);
@@ -250,10 +251,14 @@ try {
     }
   }
   await until(() => alive() && sawReplyBody, 45000);
-  const expectedFinal = refuses ? 'refused' : 'inbox-consumed';
+  const expectedFinal = refuses ? 'refused' : profile === 'body' ? 'host-queued' : 'inbox-consumed';
   await until(() => row()?.status === expectedFinal, 5000);
   assert.equal(row()?.status, expectedFinal);
   assert.equal(db.prepare('SELECT count(*) AS n FROM local_delivery_outbox WHERE message_id=?').get(replyId).n, 1);
+  if (profile === 'body') {
+    assert.ok(!modelCalls.some(name => name.endsWith('__get_inbox')), 'the native body must not require an MCP body fetch');
+    assert.equal(sawNativeNotice, false, 'full native delivery is not an xats-inbox injection');
+  }
   const attempts = db.prepare('SELECT count(*) AS n FROM local_delivery_attempts WHERE message_id=?').get(replyId).n;
   assert.equal(attempts, 1, 'native and plugin polling must not both own the same message');
   const nativeReply = await until(() => {
@@ -285,7 +290,8 @@ try {
   console.log(JSON.stringify({ realCli: true, syntheticModel: true, nativeListAgentsDiscoveredPi: true,
     nativeSendMessageCommittedPiMailbox: true, cliVersion, profile, policy, nativeReplyObservation: nativeReply,
     observerGeneration: currentGeneration,
-    replyBodyReadByRealMcp: sawReplyBody, terminalRefusalPreserved: refuses ? finalStatus === 'refused' : undefined,
+    replyBodyReadByRealMcp: profile !== 'body' && sawReplyBody,
+    fullBodyReceivedNatively: profile === 'body' && sawReplyBody, terminalRefusalPreserved: refuses ? finalStatus === 'refused' : undefined,
     attempts, daemonRestartPreservedMail: true,
     featureFlagSpecified: false, calls: modelCalls, modelRequests: requestCount }, null, 2));
 } catch (error) {

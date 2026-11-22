@@ -152,6 +152,16 @@ class JournalTests(unittest.TestCase):
         second = peer.owner_lock(folder)
         os.close(second)
 
+    def test_full_body_uses_native_peer_envelope_without_faking_claude_or_permission_mode(self):
+        request = dict(self.request, delivery='body', source_name='Pi "worker"', text='Full native reply body')
+        content = peer.native_content(request, self.reply)
+        self.assertIn('from-name="xats:Pi &quot;worker&quot;"', content)
+        self.assertIn('Full native reply body', content)
+        self.assertIn('from="uds:' + str(self.reply) + '"', content)
+        self.assertNotIn('from-mode=', content)
+        self.assertNotIn('get_inbox', content)
+        self.assertEqual(peer.native_content(dict(request, delivery='notice'), self.reply), request['text'])
+
     def test_mailbox_sockets_are_vetted_siblings_and_cleanup_keeps_host_namespace(self):
         # Short socket paths, with the durable journal on the test's disk root.
         with tempfile.TemporaryDirectory(prefix='xn-', dir='/tmp') as scratch:

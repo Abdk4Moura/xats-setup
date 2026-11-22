@@ -57,6 +57,7 @@ function receive(state, value) {
     if (prior === "host-queued" && ["transport-written", "unknown", "held"].includes(value.stage)) return;
     state.receipts.push(value);
     state.latest.set(value.attempt_id, value);
+    if (["host-queued", "refused", "expired", "failed", "inbox-consumed"].includes(value.stage)) delete request.text;
   } else if (value.kind === "diagnostic") {
     error = cleanLine(value.reason || "native peer diagnostic");
   }
@@ -178,9 +179,16 @@ export async function nativeSubmit($, hint, message, text) {
   if (!UUID.test(hint.attempt_id) || !UUID.test(hint.message_id)) throw new Error("invalid native hint");
   const request = { attempt_id: hint.attempt_id, message_id: hint.message_id,
     generation: hint.generation, event_id: hint.event_id,
-    source_agent_id: message.from_agent_id,
-    text: `New xats message from ${cleanLine(message.from_name || "peer")}\n${text}\n` +
-      `<xats-native-notice attempt="${hint.attempt_id}" generation="${hint.generation}" event="${hint.event_id}"/>` };
+    source_agent_id: message.from_agent_id, source_name: cleanLine(message.from_name || "peer"),
+    delivery: "body", text: "" };
+  try { if (String(await $.env.get("XATS_NATIVE_DELIVERY")) === "notice") request.delivery = "notice"; }
+  catch { /* full-body native delivery is the default */ }
+  if (request.delivery === "body" && typeof message.body !== "string") throw new Error("native message body unavailable");
+  const content = request.delivery === "notice" ? text :
+    `${message.subject ? `Subject: ${cleanLine(message.subject)}\n\n` : ""}${message.body}`;
+  // Treat protocol-looking text in the body as data, not another sender header.
+  request.text = content.replace(/<\/?cross-session-message\b/gi, tag => tag.replace("<", "&lt;")) +
+    `\n<xats-native-notice attempt="${hint.attempt_id}" generation="${hint.generation}" event="${hint.event_id}"/>`;
   state.requests.set(hint.attempt_id, request);
   const response = `${state.root}/responses/${hint.attempt_id}.json`;
   await $.fs.write(response, "");
@@ -246,9 +254,12 @@ export async function observeNativeReceive($, e, next) {
   }
   if (!["peer", "peer-send-message"].includes(e.origin?.kind) || typeof queued?.text !== "string") return queued;
   const marker = /<xats-native-notice attempt="([0-9a-f-]{36})" generation="([0-9]+)" event="([0-9]+)"\/>/gi;
-  for (const match of queued.text.matchAll(marker)) {
+  // Only the final correlation tag belongs to this native frame. A quoted tag
+  // in a full message body must never settle a different, held message.
+  const matches = [...queued.text.matchAll(marker)];
+  for (const match of matches.slice(-1)) {
     const request = state.requests.get(match[1]);
-    if (!request || request.generation !== Number(match[2]) || request.event_id !== Number(match[3]) ||
+    if (!request || request.generation !== Number(match[2]) || request.event_id !== Number(match[3]) || typeof request.text !== "string" ||
         !queued.text.includes(request.text)) continue;
     const prior = state.latest.get(request.attempt_id)?.stage;
     if (["refused", "expired", "failed", "inbox-consumed"].includes(prior)) continue;
@@ -277,7 +288,7 @@ export const __nativeInternals = {
 };
 
 // Stamped into /xats-status so an old loaded mod is distinguishable from disk.
-const MOD_BUILD = "2026-11-22-native-peer-v1";
+const MOD_BUILD = "2026-11-22-native-body-v1";
 const TERMINAL_OUTCOMES = ["held", "refused", "expired", "failed"];
 let nativeReceipts = [];
 let nativeFlushPromise = null;
