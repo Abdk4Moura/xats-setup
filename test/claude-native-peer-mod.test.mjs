@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { listNativePeers, listNativePeerCommand, routeNativeSend, nativeSubmit,
-  nativeBridgeState, drainNativeReceipts, __nativeInternals as internals } from '../assets/claude/mod/hooks/native-peer.js'
+  nativeBridgeState, drainNativeReceipts, __nativeInternals as internals } from '../assets/claude/mod/hooks/register.js'
 
 const agent = '11111111-1111-4111-8111-111111111111'
 const attempt = '22222222-2222-4222-8222-222222222222'
