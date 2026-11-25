@@ -24,11 +24,16 @@ export interface RegisterInput {
   delivery?: unknown
   claude_ui_pid?: number
   runtime_ui_pid?: number
+  // Internal only (reconnect recovers it from the daemon's own row). Never
+  // exposed in the register_agent schema: a caller cannot assert someone
+  // else's session key.
+  session_key?: string
 }
 
 export type RegisterResult =
   | { agent_id: string; team: string }
   | { error: 'agent_id_collision' }
+  | { error: 'identity_in_use'; detail: string }
   | { error: 'invalid_delivery'; reason: DeliveryValidationReason }
   | { error: 'claude_ui_pid_requires_channel_proxy' }
   | { error: 'device_spoofing_from_loopback' }
@@ -153,6 +158,36 @@ export class RegisterAgentService {
     })
     const key = identityKey(resolvedDevice.ok, team, input.name)
     const bound = this.connections.get(key)
+    let result: RegisterResult
+    try {
+      result = this.repo.register({
+        agent_type: input.agent_type,
+        agent_type_name: input.agent_type_name,
+        device: resolvedDevice.ok,
+        model: input.model,
+        name: input.name,
+        role,
+        team,
+        tmux_pane_id: input.tmux_pane_id,
+        session_key: input.session_key,
+        delivery: validated?.ok,
+        claude_ui_pid: input.claude_ui_pid,
+        runtime_ui_pid: input.runtime_ui_pid,
+        remote_addr: resolvedDevice.remote_addr,
+      })
+    } catch (error) {
+      if ((error as { code?: string })?.code === 'identity_in_use') {
+        return {
+          error: 'identity_in_use',
+          detail:
+            'That name is held by a different live Claude session. Do not register a second identity: ' +
+            'call reconnect({ ui_pid: $PPID }) from the session that owns it, or resume that session.',
+        }
+      }
+      throw error
+    }
+    // Only after the row was written: a refused registration must not close a
+    // healthy session that already owns the identity.
     if (bound && bound !== input.connection_id) {
       // Cross-session takeover: release the old binding and force-close the
       // prior MCP transport. The old session's `onclose` chain reaps it from
@@ -167,20 +202,7 @@ export class RegisterAgentService {
       } catch { /* best-effort */ }
     }
     this.connections.set(key, input.connection_id)
-    return this.repo.register({
-      agent_type: input.agent_type,
-      agent_type_name: input.agent_type_name,
-      device: resolvedDevice.ok,
-      model: input.model,
-      name: input.name,
-      role,
-      team,
-      tmux_pane_id: input.tmux_pane_id,
-      delivery: validated?.ok,
-      claude_ui_pid: input.claude_ui_pid,
-      runtime_ui_pid: input.runtime_ui_pid,
-      remote_addr: resolvedDevice.remote_addr,
-    })
+    return result
   }
 
   releaseConnection(agent_id: string, connection_id: string): void {

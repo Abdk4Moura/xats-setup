@@ -298,11 +298,18 @@ export function registerBusinessTools(
     } catch { /* best-effort */ }
   }
 
-  function requireAgent(): string | { error: 'unknown_agent' } {
+  // A bare error is what made the 2026-11-25 reconnect incident expensive: the
+  // model saw unknown_agent, the SessionStart bind code had expired, and the
+  // only documented in-session recovery was not named anywhere. Name it here.
+  const REBIND_HINT =
+    'This MCP session is not bound to an agent. If this is an existing or resumed session, call reconnect({ ui_pid: $PPID }), ' +
+    'or register_agent with your existing name and the same ui_pid. Do not register a new name: that splits the mailbox.'
+
+  function requireAgent(): string | { error: 'unknown_agent'; hint: string } {
     const c = caller()
-    if (!c) return { error: 'unknown_agent' }
+    if (!c) return { error: 'unknown_agent', hint: REBIND_HINT }
     const row = agents.findById(c)
-    if (!row) return { error: 'unknown_agent' }
+    if (!row) return { error: 'unknown_agent', hint: REBIND_HINT }
     return c
   }
 
@@ -530,6 +537,9 @@ export function registerBusinessTools(
       base_url?: string
       session_id?: string
       claude_ui_pid?: number
+      // Internal only: reconnect recovers this from the daemon's own row. It is
+      // never part of the register_agent argument schema.
+      session_key?: string
       delivery?: { kind: string; [key: string]: unknown }
     }
   ): Promise<unknown> {
@@ -639,6 +649,7 @@ export function registerBusinessTools(
             role: args.role,
             team: args.team,
             project_dir: args.project_dir,
+            session_key: args.session_key,
             delivery: args.delivery,
             claude_ui_pid: args.claude_ui_pid,
             runtime_ui_pid:
@@ -721,7 +732,7 @@ export function registerBusinessTools(
         'Call it once per session, before or after other xats tools, when they report unknown_agent.',
         'Pass the bind code from the xats context block (a value like "K7QM-2XPD"). Codes are single use and expire after 15 minutes.',
         'Never ask the user for the code and never invent one: it is provided in the injected context, and registration on the daemon already happened.',
-        'If no code is available, use register_agent instead, which binds the session the same way.'
+        'If no code is available, use reconnect({ ui_pid: $PPID }) for an existing session, or register_agent with your existing name and ui_pid.'
       ].join(' '),
       inputSchema: xatsBindInputSchema,
     },
@@ -736,7 +747,7 @@ export function registerBusinessTools(
       }
       const binding = bind.bindCode(args.code, sid)
       if (!binding) {
-        return { content: [{ type: 'text' as const, text: 'xats_bind failed: code invalid, expired or already used. Re-run the xats installer or use register_agent.' }] }
+        return { content: [{ type: 'text' as const, text: 'xats_bind failed: code invalid, expired or already used. For a resumed Claude Code session call reconnect({ ui_pid: $PPID }), or register_agent with your existing name and ui_pid. Re-run the xats installer only when you have no identity yet.' }] }
       }
       onRegisterSuccess?.(binding.agentId, binding.team)
       return {
@@ -810,7 +821,7 @@ export function registerBusinessTools(
         '2. `printenv CODEX_THREAD_ID` non-empty → `agent_type="codex"`; pass that value as `thread_id` (REQUIRED for codex per the schema). Do NOT pass `ui_pid` (the launcher\'s `pre_register_codex_pane` flow handles tmux pane binding; supplying `ui_pid` from codex disables that auto-bind path).',
         '3. `printenv CLAUDECODE` non-empty OR `printenv CLAUDE_CODE_ENTRYPOINT` non-empty → `agent_type="claude-code"`; pass `$PPID` as `ui_pid` to enable channel auto-bind.',
         '4. None of the above → `agent_type="custom"` with `agent_type_name="<the harness you are running under, e.g. cursor, opencode, ...>"` (`agent_type_name` is required when `agent_type="custom"`). Detect the harness name from your runtime environment if you can — e.g. `printenv CURSOR_TRACE_ID` non-empty means cursor — but do NOT guess from system-wide signals like "binary X exists on PATH": such probes detect what the user has installed, not what runtime you are inside, and pick the wrong agent type. When unsure, prefer `agent_type_name="unknown"` over a wrong guess.',
-        'Calling this tool again with the same `(device, team, name)` identity reuses the existing `agent_id` and refreshes `tmux_pane_id` and `model`; no duplicate row is created.',
+        'Calling this tool again with the same `(device, team, name)` identity reuses the existing `agent_id` and refreshes `tmux_pane_id` and `model`; no duplicate row is created. For a live Claude Code identity, pass `ui_pid` so the daemon can prove this is the same process; a different live Claude process holding that name is refused with `identity_in_use` instead of being given a new `<name>-2` mailbox.',
         'Use `agent_type="custom"` for unsupported agent harnesses; provide `agent_type_name` for observability.',
         'opencode sessions: pass `agent_type="opencode"` and `base_url` (from `$OPENCODE_XATS_BASE_URL`, set by the `free-xats-opencode` launcher). Omit `session_id` — the daemon auto-resolves it via `<base_url>/session` (most recently updated). `auth_token_ref` is optional; set only when `OPENCODE_SERVER_PASSWORD` is configured on the opencode server. The schema REQUIRES `base_url` (parseable `http://` or `https://` URL) when `agent_type="opencode"`; missing/malformed `base_url` is rejected before any HTTP probe runs.',
         'Claude Code sessions: pass `agent_type="claude-code"` and PREFERRED: pass only `ui_pid` (from `$PPID`) so the daemon auto-binds channel delivery — do not pass `channel_session_id` explicitly. When BOTH `ui_pid` AND `channel_session_id` are supplied, the daemon runs a consistency check against the caller `ui_pid`\'s live channel proxy; if the proxy\'s csid does not match the supplied `channel_session_id`, the call is rejected with `channel_session_id_ui_pid_mismatch` before any agent row is written. To re-establish a prior identity on a fresh/resumed session where you no longer remember your (team, name) (changed csid, unchanged $PPID), prefer `reconnect({ ui_pid })` over the bind_channel→register fallback; `bind_channel` only rebinds a session already bound to your agent. If instead you still remember your (team, name) after a restart + resume (changed $PPID), call register_agent directly with that remembered (team, name) and the current $PPID rather than reconnect.',
@@ -884,6 +895,7 @@ export function registerBusinessTools(
       team: match.team,
       device: match.device,
       role: match.role,
+      session_key: match.session_key ?? undefined,
       ui_pid,
     })
     if (typeof res !== 'object' || res === null || !('agent_id' in res)) {

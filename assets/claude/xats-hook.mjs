@@ -23,6 +23,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 
 // Resolve the daemon the same way the Pi adapter does: an explicit env
@@ -96,6 +97,66 @@ function readStdin() {
   });
 }
 
+// The MCP register_agent call later carries the interactive claude CLI pid
+// ($PPID). The hook is a short-lived child of a shell that Claude spawned, so
+// walk ancestors and record that same pid at SessionStart. A later
+// register_agent can then prove it is this session instead of being refused, or
+// being given a duplicate `<name>-2` identity. Only a process whose comm is
+// actually claude is accepted: recording any other pid would block the real
+// session later.
+function procStatPpid(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = stat.lastIndexOf(')');
+    if (close < 0) return null;
+    const ppid = parseInt(stat.slice(close + 2).split(' ')[1], 10);
+    return Number.isInteger(ppid) && ppid > 0 ? ppid : null;
+  } catch {
+    return null;
+  }
+}
+
+function procComm(pid) {
+  try {
+    const comm = fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
+    if (comm) return comm;
+  } catch { /* no /proc, e.g. macOS */ }
+  try {
+    return execFileSync('ps', ['-o', 'comm=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function procPpid(pid) {
+  const fromProc = procStatPpid(pid);
+  if (fromProc !== null) return fromProc;
+  try {
+    const n = parseInt(execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' }).trim(), 10);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function isClaudeProcess(pid) {
+  const comm = procComm(pid).toLowerCase();
+  if (!comm) return false;
+  const base = comm.split(/[\\/]/).pop();
+  return base === 'claude' || base === 'claude.exe';
+}
+
+function resolveClaudePid() {
+  let pid = process.ppid;
+  for (let depth = 0; depth < 16 && pid > 1; depth += 1) {
+    if (isClaudeProcess(pid)) return pid;
+    const next = procPpid(pid);
+    if (!next || next === pid) break;
+    pid = next;
+  }
+  return undefined;
+}
+
 // A malformed hook payload must never break the session, so parse defensively.
 async function readEvent() {
   try {
@@ -147,6 +208,13 @@ async function start() {
   // as the Pi and opencode adapters do.
   const body = { name: id.name, team: TEAM, agent_type: 'claude-code', session_key: id.sessionKey ?? undefined, name_mode: id.mode, bind_mcp: Boolean(id.sessionKey) };
   if (id.delivery) body.delivery = id.delivery;
+  // Interactive sessions only: job hooks carry their own delivery and do not
+  // recover through register_agent. Omit rather than guess when the ancestor
+  // chain does not identify a claude process.
+  if (id.sessionKey && !id.delivery) {
+    const uiPid = resolveClaudePid();
+    if (uiPid !== undefined) body.ui_pid = uiPid;
+  }
   // Connected delivery is the default; 0 explicitly selects compatibility mode.
   // Never expose the adapter capability in model context.
   const deliveryFile = deliveryFileFor(id.tag);
