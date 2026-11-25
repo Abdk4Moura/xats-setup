@@ -295,7 +295,7 @@ try {
   assert.equal(after.messages.filter(m => m.body.includes(payload)).length, 1, 'native mailbox commit survives daemon restart exactly once');
   console.log(JSON.stringify({ realCli: true, syntheticModel: true, nativeListAgentsDiscoveredPi: true,
     nativeSendMessageCommittedPiMailbox: true, cliVersion, profile, policy, nativeReplyObservation: nativeReply,
-    observerGeneration: currentGeneration,
+    observerGeneration,
     replyBodyReadByRealMcp: profile !== 'body' && sawReplyBody,
     fullBodyReceivedNatively: profile === 'body' && sawReplyBody, terminalRefusalPreserved: refuses ? finalStatus === 'refused' : undefined,
     attempts, daemonRestartPreservedMail: true,
