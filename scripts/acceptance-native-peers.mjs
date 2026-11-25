@@ -274,10 +274,16 @@ try {
   }
   assert.equal(journal.prepare("SELECT count(*) AS n FROM incoming WHERE state='stored'").get().n, 1);
   const finalStatus = row()?.status;
-  const currentGeneration = db.prepare('SELECT max(generation) AS n FROM local_delivery_leases').get().n;
+  const observerGeneration = db.prepare('SELECT max(generation) AS n FROM local_delivery_leases').get().n;
   if (profile === 'restart-refuse') {
-    assert.ok(currentGeneration > row().generation, 'the receipt keeps its old generation despite a new observer');
-    assert.ok(db.prepare("SELECT count(*) AS n FROM local_delivery_facts WHERE stage='refused'").get().n > 0);
+    // A daemon restart keeps a still-valid lease generation, so the meaningful
+    // evidence is that the original attempt settled as refused, after a real
+    // inbox read, rather than being consumed by the newer observer.
+    const refusedFacts = db.prepare("SELECT attempt_id FROM local_delivery_facts WHERE stage='refused'").all();
+    assert.ok(refusedFacts.some(f => f.attempt_id === row().attempt_id),
+      'the refusal settled the original attempt, not a replacement');
+    assert.ok(db.prepare("SELECT count(*) AS n FROM local_delivery_facts WHERE stage='inbox-consumed'").get().n === 0,
+      'a covering read never overwrote the refusal');
   }
   journal.close();
   db.close();
