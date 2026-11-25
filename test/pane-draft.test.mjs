@@ -3,10 +3,10 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 import { buildSync } from 'esbuild'
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xats-pane-draft-'))
 buildSync({ entryPoints: [path.join(root, 'daemon/src/mcp/pane-draft.ts')], bundle: true, platform: 'node', format: 'esm', outfile: path.join(dir, 'draft.mjs') })
 const { extractDraft } = await import(pathToFileURL(path.join(dir, 'draft.mjs')).href)
