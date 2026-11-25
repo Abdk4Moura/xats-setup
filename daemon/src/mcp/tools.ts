@@ -302,8 +302,9 @@ export function registerBusinessTools(
   // model saw unknown_agent, the SessionStart bind code had expired, and the
   // only documented in-session recovery was not named anywhere. Name it here.
   const REBIND_HINT =
-    'This MCP session is not bound to an agent. If this is an existing or resumed session, call reconnect({ ui_pid: $PPID }), ' +
-    'or register_agent with your existing name and the same ui_pid. Do not register a new name: that splits the mailbox.'
+    'This MCP session is not bound to an agent. If you know the name this session registered with (see the xats SessionStart context), ' +
+    'call register_agent with that exact name and ui_pid: $PPID. If you do not know the name, call reconnect({ ui_pid: $PPID }). ' +
+    'Do not register a new name: that splits the mailbox.'
 
   function requireAgent(): string | { error: 'unknown_agent'; hint: string } {
     const c = caller()
@@ -732,7 +733,7 @@ export function registerBusinessTools(
         'Call it once per session, before or after other xats tools, when they report unknown_agent.',
         'Pass the bind code from the xats context block (a value like "K7QM-2XPD"). Codes are single use and expire after 15 minutes.',
         'Never ask the user for the code and never invent one: it is provided in the injected context, and registration on the daemon already happened.',
-        'If no code is available, use reconnect({ ui_pid: $PPID }) for an existing session, or register_agent with your existing name and ui_pid.'
+        'If no code is available, call register_agent with this session\'s existing name and ui_pid, or reconnect({ ui_pid: $PPID }) when the name is unknown.'
       ].join(' '),
       inputSchema: xatsBindInputSchema,
     },
@@ -747,7 +748,7 @@ export function registerBusinessTools(
       }
       const binding = bind.bindCode(args.code, sid)
       if (!binding) {
-        return { content: [{ type: 'text' as const, text: 'xats_bind failed: code invalid, expired or already used. For a resumed Claude Code session call reconnect({ ui_pid: $PPID }), or register_agent with your existing name and ui_pid. Re-run the xats installer only when you have no identity yet.' }] }
+        return { content: [{ type: 'text' as const, text: 'xats_bind failed: code invalid, expired or already used. If you know this session\'s existing name, call register_agent with that exact name and ui_pid: $PPID; otherwise call reconnect({ ui_pid: $PPID }). Re-run the xats installer only when you have no identity yet.' }] }
       }
       onRegisterSuccess?.(binding.agentId, binding.team)
       return {
