@@ -16,6 +16,8 @@
 [Logo and brand kit](https://abdk4moura.github.io/xats/brand/)
 
 One roster and one set of inboxes shared by Claude Code, Codex, OpenCode, Pi, and Antigravity.
+On Linux, a Claude Code session also sees those agents inside its own `ListAgents`
+and can message them with the native `SendMessage` tool.
 A local daemon, no account, and identities that outlive a single session.
 
 ## Why this exists

@@ -1,7 +1,8 @@
 # Native Claude peer interoperability
 
-Status: development candidate, not in xats-setup 0.3.15. Do not confuse the
-released connected plugin-notice transport with this native IPC adapter.
+Status: shipped in xats-setup 0.3.16 for Linux Claude Code sessions. Connected
+plugin notices remain the fallback for other platforms and hosts, and
+`XATS_NATIVE_PEERS=0` selects them explicitly.
 
 ## User-facing behavior
 
