@@ -54,6 +54,7 @@ export interface RuntimeUiPidMatch {
   team: string
   name: string
   role: string
+  session_key: string | null
   last_seen_at: string
 }
 
@@ -124,7 +125,7 @@ export class AgentsRepo {
 
   findByRuntimeUiPid(ui_pid: number, localDevice: string): RuntimeUiPidMatch[] {
     return this.db.prepare(
-      `SELECT agent_id, device, team, name, role, last_seen_at
+      `SELECT agent_id, device, team, name, role, session_key, last_seen_at
        FROM agents
        WHERE device = ?
          AND role != '__channel_proxy__'
@@ -160,10 +161,10 @@ export class AgentsRepo {
     const findRow = (candidate: string) =>
       this.db
         .prepare(
-          `SELECT agent_id, agent_type, session_key, name, last_seen_at, binding_lost FROM agents WHERE device=? AND team=? AND name=?`
+          `SELECT agent_id, agent_type, session_key, name, last_seen_at, binding_lost, runtime_ui_pid FROM agents WHERE device=? AND team=? AND name=?`
         )
         .get(device, team, candidate) as
-        | { agent_id: string; agent_type: AgentType | null; session_key: string | null; name: string; last_seen_at: string; binding_lost: number }
+        | { agent_id: string; agent_type: AgentType | null; session_key: string | null; name: string; last_seen_at: string; binding_lost: number; runtime_ui_pid: number | null }
         | undefined
 
     let existing = findRow(requestedName)
@@ -187,18 +188,42 @@ export class AgentsRepo {
     if (existing) {
       const sameSession = sessionKey !== null && existing.session_key === sessionKey &&
         (existing.agent_type !== 'claude-code' || input.agent_type === 'claude-code')
+      // register_agent carries ui_pid but no session_key. A matching ui_pid is
+      // proof that this is the same live process, so a reconnected MCP session
+      // can keep the identity it already owns.
+      const sameProcess = input.runtime_ui_pid !== undefined &&
+        existing.runtime_ui_pid !== null &&
+        existing.runtime_ui_pid === input.runtime_ui_pid
+      const sameIdentity = sameSession || sameProcess
       const bindingLost = Number(existing.binding_lost ?? 0) === 1
       const live = isAgentLive({ last_seen_at: existing.last_seen_at }, { ttlMs }) && !bindingLost
-      // A retained Claude mailbox cannot be taken over when its name ages out.
+      // A retained Claude mailbox keeps its identity across reconnects, but a
+      // different live Claude process must not seize it by name.
       const retainedClaude = existing.agent_type === 'claude-code' && existing.session_key !== null && !bindingLost
       const wantsDistinct = sessionKey !== null || mode === 'exact' || retainedClaude
-      if (wantsDistinct && !sameSession && (live || retainedClaude)) {
+      if (wantsDistinct && !sameIdentity && (live || retainedClaude)) {
         if (mode === 'exact') {
           const conflict = new Error('name_taken') as Error & { code?: string }
           conflict.code = 'name_taken'
           throw conflict
         }
-        name = this.allocateName(device, team, requestedName, sessionKey, input.agent_type, ttlMs, findRow)
+        const differentLiveProcess =
+          input.agent_type === 'claude-code' &&
+          input.runtime_ui_pid !== undefined &&
+          existing.runtime_ui_pid !== null &&
+          existing.runtime_ui_pid !== input.runtime_ui_pid &&
+          live
+        if (differentLiveProcess) {
+          const conflict = new Error('identity_in_use') as Error & { code?: string }
+          conflict.code = 'identity_in_use'
+          throw conflict
+        }
+        if (!(input.agent_type === 'claude-code' && sessionKey === null)) {
+          name = this.allocateName(device, team, requestedName, sessionKey, input.agent_type, ttlMs, findRow)
+        }
+        // Claude + no session key falls through and reuses `requestedName`: the
+        // exact name already names a Claude mailbox, so minting `<name>-2`
+        // would split the identity. A different live pid was refused above.
       }
     }
 
@@ -447,7 +472,13 @@ export class AgentsRepo {
   }
 
   touch(agent_id: string): void {
-    this.db.prepare(`UPDATE agents SET last_seen_at=? WHERE agent_id=?`).run(new Date().toISOString(), agent_id)
+    // Acting is presence. Without clearing offline_since, an agent that was
+    // marked offline stays `online: false` forever while it is demonstrably
+    // replying, because the reaper only ever sets the column and touch only
+    // moved last_seen_at.
+    this.db.prepare(
+      `UPDATE agents SET last_seen_at=?, offline_since=NULL WHERE agent_id=?`
+    ).run(new Date().toISOString(), agent_id)
   }
 
   /**

@@ -6,6 +6,7 @@ export interface ReconnectCandidate {
   team: string
   name: string
   role: string
+  session_key: string | null
   last_seen_at: string
 }
 
@@ -21,6 +22,7 @@ function toCandidate(row: RuntimeUiPidMatch): ReconnectCandidate {
     team: row.team,
     name: row.name,
     role: row.role,
+    session_key: row.session_key,
     last_seen_at: row.last_seen_at,
   }
 }

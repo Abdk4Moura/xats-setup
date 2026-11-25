@@ -135,6 +135,38 @@ test('Claude first MCP call binds exactly its hook identity; resumes keep mailbo
   }, { AGENT_TTL_MS: '100', AGENT_REAP_INTERVAL_MS: '50' })
 })
 
+// The 2026-11-25 incident: after the MCP server reconnected, the model called
+// register_agent with the session's existing name but no session key. The daemon
+// returned a NEW `<name>-2` identity, so the session's mod never surfaced half
+// the mail. The retained row must be reused instead.
+test('a reconnected Claude MCP session reuses its retained name instead of minting -2', { timeout: 90000, skip: !deps || !fs.existsSync(cli) }, async () => {
+  await fixture(async base => {
+    const hook = await post(base, '/api/register', {
+      name: 'claude-rebind', team: 'default', agent_type: 'claude-code',
+      session_key: 'session-rebind', bind_mcp: true,
+    })
+    assert.equal(hook.status, 200)
+
+    const reconnected = await mcpClient(base)
+    try {
+      // No session key here: the MCP process never sees one. The daemon must
+      // recognize the exact name as the retained Claude identity.
+      const reg = output(await reconnected.client.callTool({
+        name: 'register_agent',
+        arguments: { name: 'claude-rebind', team: 'default', agent_type: 'claude-code' },
+      }))
+      assert.equal(reg.agent_id, hook.data.agent_id)
+      assert.equal(reg.name, 'claude-rebind')
+
+      // And the MCP session now reads and writes the one mailbox.
+      const inbox = output(await reconnected.client.callTool({ name: 'get_inbox', arguments: {} }))
+      assert.equal(inbox.error, undefined)
+    } finally {
+      await reconnected.close()
+    }
+  })
+})
+
 // The bind code exists so the MODEL can claim the session with an ordinary tool
 // call. A PreToolUse hook that rewrote tool arguments to inject the token made
 // Claude Code's auto mode refuse every xats call, because the executed call no

@@ -199,6 +199,107 @@ test("re-registering the same session reconnects to the same agent_id", async (t
   assert.equal(again.body.name, first.body.name);
 });
 
+test("a Claude MCP reconnect reuses its named identity instead of minting -2", async (t) => {
+  if (skip(t)) return;
+  // Shape of the 2026-11-25 incident: the SessionStart hook registered a
+  // retained Claude row, the MCP server reconnected, and the model called
+  // register_agent with the same name but no session key.
+  const first = await register({
+    name: "claude-mcp-reconnect",
+    agent_type: "claude-code",
+    session_key: "sess-CMR",
+    name_mode: "prefer",
+  });
+  assert.equal(first.status, 200);
+
+  const recovery = await register({
+    name: "claude-mcp-reconnect",
+    agent_type: "claude-code",
+  });
+
+  assert.equal(recovery.status, 200);
+  assert.equal(
+    recovery.body.name,
+    "claude-mcp-reconnect",
+    "the recovery keeps the exact name; a -2 mailbox splits replies",
+  );
+  assert.equal(
+    recovery.body.agent_id,
+    first.body.agent_id,
+    "the recovery reuses the retained row, not a duplicate identity",
+  );
+});
+
+test("a Claude reconnect records the runtime ui_pid for later proofs", async (t) => {
+  if (skip(t)) return;
+  const first = await register({
+    name: "claude-pid-proof",
+    agent_type: "claude-code",
+    session_key: "sess-CPP",
+    name_mode: "prefer",
+    ui_pid: 424242,
+  });
+  assert.equal(first.status, 200);
+
+  const row = withDb((db) =>
+    db.prepare("SELECT runtime_ui_pid FROM agents WHERE name=?").get("claude-pid-proof"),
+  );
+  assert.equal(row.runtime_ui_pid, 424242);
+
+  // The same process, now without a session key, is recognized by its pid.
+  const again = await register({
+    name: "claude-pid-proof",
+    agent_type: "claude-code",
+    ui_pid: 424242,
+  });
+  assert.equal(again.status, 200);
+  assert.equal(again.body.agent_id, first.body.agent_id);
+});
+
+test("a different live Claude process cannot take a retained name", async (t) => {
+  if (skip(t)) return;
+  const first = await register({
+    name: "claude-held-name",
+    agent_type: "claude-code",
+    session_key: "sess-CHN1",
+    name_mode: "prefer",
+    ui_pid: 111111,
+  });
+  assert.equal(first.status, 200);
+
+  const clash = await register({
+    name: "claude-held-name",
+    agent_type: "claude-code",
+    ui_pid: 222222,
+  });
+
+  assert.equal(clash.status, 409);
+  assert.equal(clash.body.error, "identity_in_use");
+});
+
+test("activity clears offline_since instead of reporting a replying agent offline", async (t) => {
+  if (skip(t)) return;
+  const reg = await register({ name: "presence", session_key: "sess-P" });
+  withDb((db) =>
+    db.prepare("UPDATE agents SET offline_since=? WHERE name=?").run(
+      new Date().toISOString(),
+      "presence",
+    ),
+  );
+
+  const heartbeat = await fetch(`${env.base}/api/heartbeat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_id: reg.body.agent_id }),
+  });
+  assert.equal(heartbeat.status, 200);
+
+  const row = withDb((db) =>
+    db.prepare("SELECT offline_since FROM agents WHERE name=?").get("presence"),
+  );
+  assert.equal(row.offline_since, null);
+});
+
 test("exact mode refuses a name a live agent already holds", async (t) => {
   if (skip(t)) return;
   await register({

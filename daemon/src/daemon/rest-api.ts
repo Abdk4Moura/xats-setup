@@ -192,6 +192,9 @@ const registerBodySchema = z.object({
   model: z.string().optional(),
   name_mode: z.enum(['prefer', 'exact']).optional(),
   session_key: z.string().min(1).optional(),
+  // The Claude UI process pid. Stored as runtime_ui_pid so a later MCP
+  // reconnect can prove it is the same session instead of minting a duplicate.
+  ui_pid: z.number().int().positive().optional(),
   bind_mcp: z.boolean().optional(),
   local_delivery: z.boolean().optional(),
   delivery: z.unknown().optional(),
@@ -273,6 +276,7 @@ async function handleRegister(ctx: RestCtx, req: FastifyRequest, reply: FastifyR
     model: data.model,
     name_mode: data.name_mode,
     session_key: data.session_key,
+    runtime_ui_pid: data.agent_type === 'claude-code' ? data.ui_pid : undefined,
     delivery,
   }
   let result: ReturnType<typeof ctx.agents.register>
@@ -285,6 +289,13 @@ async function handleRegister(ctx: RestCtx, req: FastifyRequest, reply: FastifyR
         error: 'name_taken',
         name: data.name,
         detail: 'a live agent on this team already holds that name',
+      })
+    }
+    if (code === 'identity_in_use') {
+      return reply.code(409).send({
+        error: 'identity_in_use',
+        name: data.name,
+        detail: 'a different live Claude session holds that name. Keep using that session or resume it; a second identity would split the mailbox.',
       })
     }
     throw error
