@@ -47,17 +47,21 @@ function assertVersion(binary, version) {
   assert.match(actual, new RegExp(`(?:^|\\s)${version.replaceAll('.', '\\.')}($|\\s)`), `Expected pinned version ${version}, got ${actual}`);
 }
 try {
-  const prefix = path.join(tools, `claude-${pins.claude.version}`);
-  const claude = path.join(prefix, 'node_modules/.bin/claude');
-  const ready = path.join(prefix, '.xats-native-ready');
-  if (!fs.existsSync(claude) || !fs.existsSync(ready)) {
-    run('npm', ['install', '--prefix', prefix, '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', `${pins.claude.npmPackage}@${pins.claude.version}`]);
-    // The pinned wrapper needs its documented postinstall to replace the CLI
-    // stub with the native optional dependency. Run only that known script.
-    run(process.execPath, [path.join(prefix, 'node_modules/@anthropic-ai/claude-code/install.cjs')]);
+  const claudes = [];
+  for (const pin of [pins.claude, pins.claudeCurrent]) {
+    const prefix = path.join(tools, `claude-${pin.version}`);
+    const claude = path.join(prefix, 'node_modules/.bin/claude');
+    const ready = path.join(prefix, '.xats-native-ready');
+    if (!fs.existsSync(claude) || !fs.existsSync(ready)) {
+      run('npm', ['install', '--prefix', prefix, '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', `${pin.npmPackage}@${pin.version}`]);
+      // The pinned wrapper needs its documented postinstall to replace the CLI
+      // stub with the native optional dependency. Run only that known script.
+      run(process.execPath, [path.join(prefix, 'node_modules/@anthropic-ai/claude-code/install.cjs')]);
+    }
+    assertVersion(claude, pin.version);
+    fs.writeFileSync(ready, `${pin.version}\n`);
+    claudes.push(claude);
   }
-  assertVersion(claude, pins.claude.version);
-  fs.writeFileSync(ready, `${pins.claude.version}\n`);
 
   const archive = path.join(tools, `agy-${pins.agy.version}.tar.gz`);
   if (!fs.existsSync(archive)) {
@@ -82,14 +86,16 @@ try {
   assertVersion(agy, pins.agy.version);
 
   const mod = path.join(repo, 'assets/claude/mod');
-  const claudeReport = JSON.parse(run(claude, ['plugin', 'validate', '--strict', '--json', mod]));
-  assert.equal(claudeReport.success, true);
-  assert.ok(claudeReport.contents?.some(item => item.type === 'hooks'), 'Claude validator did not find the mod hooks');
   assert.ok(fs.readdirSync(path.join(mod, 'tests')).some(name => /\.test\.tsx?$/.test(name)), 'Claude mod tests are missing');
-  const kit = run(claude, ['plugin', 'test', mod]);
-  assert.match(kit, /\b[1-9]\d* pass\b/, 'Claude kit did not execute passing tests');
-  assert.match(kit, /\b0 fail\b/, 'Claude kit did not report zero failures');
-  assert.doesNotMatch(kit, /\b[1-9]\d* skip(?:ped)?\b/, 'Claude kit unexpectedly skipped tests');
+  for (const claude of claudes) {
+    const claudeReport = JSON.parse(run(claude, ['plugin', 'validate', '--strict', '--json', mod]));
+    assert.equal(claudeReport.success, true);
+    assert.ok(claudeReport.contents?.some(item => item.type === 'hooks'), 'Claude validator did not find the mod hooks');
+    const kit = run(claude, ['plugin', 'test', mod]);
+    assert.match(kit, /\b[1-9]\d* pass\b/, 'Claude kit did not execute passing tests');
+    assert.match(kit, /\b0 fail\b/, 'Claude kit did not report zero failures');
+    assert.doesNotMatch(kit, /\b[1-9]\d* skip(?:ped)?\b/, 'Claude kit unexpectedly skipped tests');
+  }
   const agyReport = JSON.parse(run(agy, ['plugin', 'validate', '--strict', '--json', path.join(repo, 'assets/agy')]));
   assert.equal(agyReport.name, 'xats');
   assert.equal(agyReport.components?.mcpServers, 1, 'Antigravity did not discover the MCP server');

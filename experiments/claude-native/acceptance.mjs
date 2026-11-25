@@ -16,6 +16,8 @@ assert.equal(pins.claude.version, '2.1.295', 'Review protocol fixtures before ch
 const tools = process.env.XATS_CI_HOST_TOOLS;
 const cli = process.env.XATS_NATIVE_CLAUDE || (tools && path.join(tools, `claude-${pins.claude.version}`, 'node_modules/.bin/claude'));
 assert.ok(cli && fs.existsSync(cli), 'Set XATS_NATIVE_CLAUDE or provision pinned tools first');
+const currentCli = process.env.XATS_NATIVE_CLAUDE_CURRENT || (tools && path.join(tools, `claude-${pins.claudeCurrent.version}`, 'node_modules/.bin/claude'));
+assert.ok(currentCli && fs.existsSync(currentCli), 'Set XATS_NATIVE_CLAUDE_CURRENT or provision both pinned Claude builds first');
 const daemon = path.join(repo, 'daemon/dist/cli.js');
 assert.ok(fs.existsSync(daemon), 'Build current daemon source before native acceptance');
 const scratch = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'xn-'));
@@ -45,6 +47,9 @@ try {
   const unit = run(['-m', 'unittest', 'discover', '-s', here, '-p', 'test_*.py', '-v']);
   assert.match(unit, /Ran [1-9]\d* tests? in/);
   assert.doesNotMatch(unit, /skipped|expected failure|unexpected success/i);
+  const adapterUnit = run(['-m', 'unittest', 'discover', '-s', path.join(repo, 'test/native-peer'), '-p', 'test_*.py', '-v']);
+  assert.match(adapterUnit, /Ran [1-9]\d* tests? in/);
+  assert.doesNotMatch(adapterUnit, /skipped|expected failure|unexpected success/i);
   probe('policy_probe.py', ['--policy', 'refuse']);
   probe('policy_probe.py', ['--policy', 'hold']);
   probe('outbound_probe.py');
@@ -65,7 +70,19 @@ try {
     assert.ok(report?.receipts.some(receipt => receipt.status === (policy === 'hold' ? 'held' : 'refused')
       && receipt.correlated && receipt.process_start_matches));
   }
-  console.log('Experimental Linux native protocol acceptance passed: refusal, hold, actual native SendMessage, xats mailbox commit, duplicate fencing, and backend restart. Synthetic model only; no production transport enabled.');
+  for (const [version, binary] of [[pins.claude.version, cli], [pins.claudeCurrent.version, currentCli]]) {
+    for (const policy of ['accept', 'refuse', 'hold', 'restart-refuse']) {
+      const nativeAdapter = spawnSync(process.execPath, [path.join(repo, 'scripts/acceptance-native-peers.mjs')], {
+        cwd: repo, env: { ...env, XATS_NATIVE_CLAUDE: binary, XATS_NATIVE_EXPECT_VERSION: version, XATS_NATIVE_POLICY: policy },
+        encoding: 'utf8', timeout: 90000, maxBuffer: 2 * 1024 * 1024,
+      });
+      if (nativeAdapter.stdout) process.stdout.write(nativeAdapter.stdout);
+      if (nativeAdapter.stderr) process.stderr.write(nativeAdapter.stderr);
+      if (nativeAdapter.error) throw nativeAdapter.error;
+      assert.equal(nativeAdapter.status, 0, `Actual default native peer adapter acceptance failed (${version}, ${policy})`);
+    }
+  }
+  console.log('Linux native acceptance passed on both pinned hosts: discovery/send, refusal, held release, durable commit, duplicate fencing and backend restart. Deterministic model and Pi mailbox fixture only; production bus untouched.');
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

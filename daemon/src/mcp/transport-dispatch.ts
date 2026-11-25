@@ -25,7 +25,7 @@ export interface DispatchDeps {
 }
 
 export type TmuxPokeResult =
-  | { ok: true; pane_tail_before: string; pane_tail_after: string }
+  | { ok: true; pane_tail_before: string; pane_tail_after: string; draft_saved?: string; draft_restored?: boolean }
   | { error: string; detail?: unknown }
 
 export interface TargetRow {

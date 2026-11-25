@@ -103,6 +103,75 @@ test('isolated durable local delivery store', { skip: !sqliteDir && 'better-sqli
     } finally { db.close() }
   })
 
+  for (const coveringRead of [false, true]) await t.test(`a delayed refusal settles its original attempt after restart (covering read=${coveringRead})`, () => {
+    const { db, store } = fixture()
+    try {
+      const first = lease(store)
+      enqueue(store, 'late-refusal', 7)
+      const [original] = store.claim(first.token, { now: 10002 })
+      ack(store, first.token, original, 'transport-written')
+      store.rearmAfterRestart(10004)
+      const observer = lease(store, 'a', 10005)
+      const foreign = lease(store, 'b', 10005)
+      const [replacement] = store.claim(observer.token, { now: 10006 })
+      ack(store, observer.token, replacement, 'transport-written', 10007)
+      if (coveringRead) {
+        db.prepare('UPDATE agents SET last_processed_event_id=7 WHERE agent_id=?').run('a')
+        store.consumeThrough('a', 7, 10008)
+      }
+      const fact = { attemptId: original.attempt_id, generation: first.generation, stage: 'refused', now: 10009 }
+      assert.equal(store.observe(first.token, fact), false, 'an expired observer token never regains authority')
+      assert.equal(store.observe(foreign.token, fact), false, 'a different mailbox cannot report this receipt')
+      assert.equal(store.observe(observer.token, { ...fact, generation: observer.generation }), false)
+      assert.equal(ack(store, observer.token, original, 'refused', 10009), false, 'ordinary stale ACKs remain forbidden')
+      assert.equal(store.observe(observer.token, fact), true)
+      const row = store.listForMessage('late-refusal')[0]
+      assert.equal(row.status, 'refused')
+      assert.equal(row.attempt_id, original.attempt_id, 'do not fabricate a receipt for the replacement attempt')
+      assert.equal(row.generation, first.generation)
+      assert.equal(db.prepare('SELECT status FROM local_delivery_attempts WHERE attempt_id=?').get(original.attempt_id).status, 'refused')
+      assert.equal(store.consumeThrough('a', 7, 10010), 0)
+      assert.equal(store.listForMessage('late-refusal')[0].status, 'refused')
+      assert.equal(store.observe(observer.token, { ...fact, stage: 'host-queued' }), false, 'refusal is terminal')
+    } finally { db.close() }
+  })
+
+  await t.test('a new session cannot report receipts belonging to a previous session of the same mailbox', () => {
+    const { db, store } = fixture()
+    try {
+      const first = lease(store)
+      enqueue(store, 'old-session', 1)
+      const [original] = store.claim(first.token, { now: 10002 })
+      ack(store, first.token, original, 'transport-written')
+      db.prepare('UPDATE agents SET session_key=? WHERE agent_id=?').run('new-session', 'a')
+      const next = store.issueLease({ agentId: 'a', sessionKey: 'new-session', now: 10004 })
+      assert.equal(store.observe(next.token, { attemptId: original.attempt_id, generation: first.generation,
+        stage: 'refused', now: 10005 }), false)
+    } finally { db.close() }
+  })
+
+  await t.test('an observed old held release reconciles only the actual original generation and stored MCP cursor', () => {
+    const { db, store } = fixture()
+    try {
+      const first = lease(store)
+      enqueue(store, 'held-release', 7)
+      const [original] = store.claim(first.token, { now: 10002 })
+      ack(store, first.token, original, 'held')
+      store.rearmAfterRestart(10004)
+      const observer = lease(store, 'a', 10005)
+      assert.deepEqual(store.claim(observer.token, { now: 10006 }), [])
+      db.prepare('UPDATE agents SET last_processed_event_id=7 WHERE agent_id=?').run('a')
+      assert.equal(store.consumeThrough('a', 7, 10007), 0, 'a read is not permission to release a hold')
+      assert.equal(store.observe(observer.token, { attemptId: original.attempt_id, generation: first.generation,
+        stage: 'host-queued', now: 10008 }), true)
+      const row = store.listForMessage('held-release')[0]
+      assert.equal(row.status, 'inbox-consumed')
+      assert.equal(row.attempt_id, original.attempt_id)
+      assert.equal(row.generation, first.generation)
+      assert.equal(ack(store, observer.token, original, 'inbox-consumed', 10009), false)
+    } finally { db.close() }
+  })
+
   await t.test('renew preserves generation and attempts; replacement and revocation reject stale ACKs', () => {
     const { db, store } = fixture()
     try {

@@ -62,6 +62,13 @@ let cursorSeeded = false;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let inboxTimer: ReturnType<typeof setInterval> | undefined;
 let pollingInbox = false;
+// Delivery lease: the daemon blocks /wait for us, so mail arrives as an event
+// instead of a timer tick. Falls back to polling only if unsupported.
+let lease: { token: string; generation: number; expiresAt: number } | null = null;
+let leaseRejected = false;
+let delivering = false;
+let deliveryStopped = false;
+let deliveredEvent = 0;
 
 async function request(path: string, init?: RequestInit) {
   const response = await fetch(`${baseUrl}${path}`, {
@@ -134,9 +141,20 @@ async function register() {
       agent_type_name: "pi",
       session_key: sessionKey ?? undefined,
       name_mode: nameMode,
+      // Ask for the delivery lease so mail wakes this session instead of
+      // being discovered by a three-second inbox scan.
+      local_delivery: Boolean(sessionKey),
     }),
   });
   agentId = data.agent_id;
+  if (data.local_delivery?.token) {
+    lease = {
+      token: String(data.local_delivery.token),
+      generation: Number(data.local_delivery.generation),
+      expiresAt: Date.parse(String(data.local_delivery.expiresAt)),
+    };
+    leaseRejected = false;
+  }
   // In prefer mode the daemon may disambiguate (name-2). Adopt whatever it
   // assigned so peers and this session agree on the return address.
   if (typeof data.name === "string" && data.name) name = data.name;
@@ -156,6 +174,158 @@ async function keepAlive() {
 }
 
 export default function (pi: ExtensionAPI) {
+  const leaseHeaders = () => (lease ? { "X-Xats-Delivery-Token": lease.token } : {});
+  let delivered: { attempt_id: string; event_id: number; generation: number } | null = null;
+
+  async function longRequest(path: string, init: RequestInit, ms: number) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json", ...init.headers },
+      signal: AbortSignal.timeout(ms),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error: any = new Error(`${response.status}: ${JSON.stringify(data)}`);
+      error.status = response.status;
+      throw error;
+    }
+    return data as any;
+  }
+
+  async function ackStage(attemptId: string, stage: string, generation?: number) {
+    if (!lease) return false;
+    try {
+      await request("/api/local-delivery/ack", {
+        method: "POST",
+        headers: leaseHeaders(),
+        body: JSON.stringify({ attempt_id: attemptId, stage,
+          ...(generation !== undefined && stage === "inbox-consumed" ? {} : {}) }),
+      });
+      return true;
+    } catch {
+      // A lost ack repeats the same attempt; nothing here may resubmit a turn.
+      return false;
+    }
+  }
+
+  async function ensureLease(): Promise<boolean> {
+    if (lease && lease.expiresAt - Date.now() > 15_000) return true;
+    if (lease) {
+      try {
+        const data = await request("/api/local-delivery/renew", { method: "POST", headers: leaseHeaders() });
+        lease.expiresAt = Date.parse(String(data.expiresAt));
+        if (Number.isInteger(data.generation)) lease.generation = Number(data.generation);
+        return true;
+      } catch (error: any) {
+        if (error?.status === 401 || error?.status === 409) lease = null;
+        else return true; // transient: keep owning and retry the wait
+      }
+    }
+    if (!agentId) return false;
+    try {
+      // Re-registering reissues the lease for this same durable identity.
+      await request("/api/register", {
+        method: "POST",
+        body: JSON.stringify({ name, team, role, agent_type: "custom", agent_type_name: "pi",
+          session_key: sessionKey ?? undefined, name_mode: nameMode, local_delivery: Boolean(sessionKey) }),
+      }).then((data: any) => {
+        if (data?.local_delivery?.token) {
+          lease = { token: String(data.local_delivery.token), generation: Number(data.local_delivery.generation),
+            expiresAt: Date.parse(String(data.local_delivery.expiresAt)) };
+        } else lease = null;
+      });
+    } catch { /* keep trying */ }
+    return Boolean(lease);
+  }
+
+  async function deliveredSince(eventId: number): Promise<boolean> {
+    try {
+      const data = await request(`/api/cursor?agent_id=${encodeURIComponent(agentId ?? "")}`);
+      return (Number(data.last_processed_event_id) || 0) >= eventId;
+    } catch { return false; }
+  }
+
+  async function handleHint(hint: any): Promise<void> {
+    if (!lease || hint.generation !== lease.generation) throw Object.assign(new Error("stale generation"), { status: 409 });
+    const event = Number(hint.event_id);
+    if (!Number.isInteger(event) || event < 1) return;
+    // Backlog seeded at session start is history, not new mail: never replay it
+    // as a fresh turn after a restart.
+    if (event <= lastEventId) { await ackStage(String(hint.attempt_id), "inbox-consumed"); return; }
+    if (await deliveredSince(event)) {
+      await ackStage(String(hint.attempt_id), "inbox-consumed");
+      return;
+    }
+    const data = await request(`/api/inbox?team=${encodeURIComponent(team)}&name=${encodeURIComponent(name)}&since_event_id=${event - 1}`);
+    const messages = (data.messages ?? []).filter((m: any) => Number(m.event_id) === event &&
+      (!hint.message_id || m.id === hint.message_id || m.message_id === hint.message_id));
+    if (!messages.length) {
+      // Already read through MCP: the daemon reconciles this as consumed.
+      await ackStage(String(hint.attempt_id), "inbox-consumed");
+      return;
+    }
+    submitNotices(messages);
+    delivered = { attempt_id: String(hint.attempt_id), event_id: event, generation: Number(hint.generation) };
+    await ackStage(String(hint.attempt_id), "host-queued");
+    for (const m of messages) lastEventId = Math.max(lastEventId, Number(m.event_id) || 0);
+  }
+
+  async function deliveryLoop(): Promise<void> {
+    delivering = true;
+    while (!deliveryStopped) {
+      if (!agentId || !(await ensureLease())) {
+        await new Promise(r => setTimeout(r, 1500));
+        continue;
+      }
+      // A turn we started has since been read: move the attempt forward.
+      if (delivered && await deliveredSince(delivered.event_id)) {
+        await ackStage(delivered.attempt_id, "inbox-consumed");
+        delivered = null;
+      }
+      try {
+        const data = await longRequest("/api/local-delivery/wait?timeout_ms=20000",
+          { method: "GET", headers: leaseHeaders() }, 25_000);
+        const hint = (data.hints ?? [])[0];
+        if (hint) await handleHint(hint);
+      } catch (error: any) {
+        if (error?.status === 401 || error?.status === 409) { lease = null; continue; }
+        // Only an explicit unsupported capability before any owned delivery can
+        // choose polling. A network blip keeps the lease and retries.
+        if ((error?.status === 404 || error?.status === 501) && !delivered) {
+          delivering = false;
+          startPoll();
+          return;
+        }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+    delivering = false;
+  }
+
+  function submitNotices(messages: any[]) {
+    const summary = messages.map((m: any) =>
+      `- from ${m.from_name}${m.subject ? `: ${m.subject}` : ""}${m.need_reply ? " (needs reply)" : ""}\n${m.body}`,
+    ).join("\n\n");
+    const notice: InboxNotice = {
+      count: messages.length,
+      messages: messages.map((m: any) => ({
+        from: String(m.from_name ?? "unknown"),
+        subject: m.subject ? String(m.subject) : undefined,
+        body: String(m.body ?? ""),
+        needReply: Boolean(m.need_reply),
+      })),
+    };
+    pi.sendMessage(
+      {
+        customType: "xats-inbox",
+        content: `<xats-inbox>\n${messages.length} new cross-agent message(s):\n${summary}\n\nAct on these messages now. If a message needs a reply, reply with xats_send.\n</xats-inbox>`,
+        display: true,
+        details: notice,
+      },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+  }
+
   async function pollInbox() {
     if (!agentId || pollingInbox) return;
     pollingInbox = true;
@@ -222,11 +392,26 @@ export default function (pi: ExtensionAPI) {
     heartbeatTimer = setInterval(() => { void keepAlive(); }, 30_000);
     // Polling is the delivery path: our daemon exposes no event stream, and a
     // 3 s tick is imperceptible for agent-to-agent coordination.
-    startPoll();
+    // Event-driven delivery: block on the daemon instead of scanning on a timer.
+    if (lease) {
+      deliveryStopped = false;
+      if (!cursorSeeded) {
+        try {
+          const backlog = await request(`/api/inbox?team=${encodeURIComponent(team)}&name=${encodeURIComponent(name)}&since_event_id=0`);
+          for (const m of backlog.messages ?? []) lastEventId = Math.max(lastEventId, Number(m.event_id) || 0);
+          cursorSeeded = true;
+        } catch { /* seed on the next loop iteration */ }
+      }
+      void deliveryLoop();
+    }
+    else startPoll();
     ctx.ui.setStatus("xats", ctx.ui.theme.fg("muted", id ? `xats: ${name}` : "xats: daemon unavailable"));
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    deliveryStopped = true;
+    delivered = null;
+    lease = null;
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (inboxTimer) clearInterval(inboxTimer);
     heartbeatTimer = undefined;
@@ -234,7 +419,14 @@ export default function (pi: ExtensionAPI) {
     const id = agentId;
     agentId = null;
     ctx.ui.setStatus("xats", "");
-    if (id) await request("/api/deregister", { method: "POST", body: JSON.stringify({ agent_id: id }) }).catch(() => undefined);
+    if (id) await request("/api/deregister", {
+      method: "POST",
+      // Retain the durable identity and mailbox: a reload or resume must come
+      // back as the same agent_id, not a brand-new one. Without a session key
+      // there is nothing to prove ownership with, so keep the old delete path.
+      body: JSON.stringify({ agent_id: id, session_key: sessionKey ?? undefined,
+        retain_mailbox: Boolean(sessionKey) }),
+    }).catch(() => undefined);
   });
 
   // Themed card for the inbox notification. The model still receives the

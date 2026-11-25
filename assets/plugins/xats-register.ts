@@ -546,7 +546,10 @@ const XatsRegisterPlugin: Plugin = async (input) => {
         await fetch(`${XATS_BASE}/api/deregister`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent_id: aid }),
+          // Extension unload/reload keeps the durable row and mailbox, so this
+          // session re-registers as the same agent_id instead of a new one.
+          body: JSON.stringify({ agent_id: aid, session_key: sessionKey ?? undefined,
+            retain_mailbox: Boolean(sessionKey) }),
         })
       } catch { /* ignore */ }
     },

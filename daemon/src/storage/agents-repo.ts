@@ -475,11 +475,13 @@ export class AgentsRepo {
     })()
   }
 
-  /** A session_end can only off-line the matching Claude session, never another agent. */
-  markClaudeSessionOffline(agentId: string, sessionKey: string): boolean {
+  /** A session end can only off-line the row of the session that supplies its
+   *  own matching key. Identity and mailbox are retained for any harness, so a
+   *  reload/resume re-registers onto the same durable agent_id. */
+  markSessionOffline(agentId: string, sessionKey: string): boolean {
     const result = this.db.prepare(
       `UPDATE agents SET offline_since = COALESCE(offline_since, ?)
-       WHERE agent_id = ? AND agent_type = 'claude-code' AND session_key = ?
+       WHERE agent_id = ? AND session_key = ?
          AND session_key IS NOT NULL`
     ).run(new Date().toISOString(), agentId, sessionKey)
     return result.changes === 1

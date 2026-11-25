@@ -14,6 +14,8 @@ export const criticalTests = [
   'presence expiry marks every agent offline without destroying identity',
   'send_message addresses by name [ref] and never guesses on ambiguity',
   'default hook and mod deliver through the real daemon without a feature flag',
+  'native ListAgents preserves core rows and adds explicitly attributed xats peers',
+  'a selected native owner that dies cannot fall back to another submission path',
 ];
 
 export function assertCoverage(log, { files, platform = process.platform }) {

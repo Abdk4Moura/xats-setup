@@ -135,7 +135,10 @@ async function end() {
   try { agentId = fs.readFileSync(file, 'utf8').trim(); } catch { /* nothing to do */ }
   if (!agentId) return;
   try { fs.unlinkSync(file); } catch { /* ignore */ }
-  await post('/api/deregister', { agent_id: agentId });
+  await post('/api/deregister', { agent_id: agentId, session_key: id.sessionKey ?? undefined,
+    // Keep the durable row and mailbox so a resumed session reuses its agent_id.
+    // Without a session key there is no proof of ownership, so delete as before.
+    retain_mailbox: Boolean(id.sessionKey) });
 }
 
 /**

@@ -4,10 +4,12 @@ import { parseDeliveryRow, type DeliverySpec } from '../lib/delivery-spec.js'
 import {
   isTmuxAvailable,
   capturePaneTail,
+  clearComposer,
   loadBuffer,
   pasteBuffer,
   sendEnter
 } from '../daemon/tmux-cli.js'
+import { extractDraft } from './pane-draft.js'
 import type { ChannelWakeFanout } from '../daemon/channel-wake-fanout.js'
 import { dispatchPoke, type TmuxPokeResult } from './transport-dispatch.js'
 import { runQuietGuard } from './poke-guard.js'
@@ -125,13 +127,32 @@ async function tmuxPokeImpl(args: {
       if (guard === 'fail') return { error: 'guard_failed' }
     }
     const pane_tail_before = await runStage('capture_before', () => capturePaneTail(args.pane_id, TAIL_LINES))
+    // A person may be mid-sentence. Save a draft we can reconstruct exactly,
+    // clear it, poke, then put it back without submitting it. Multi-line or
+    // wrapped drafts are never rewritten: report them instead.
+    const draft = extractDraft(pane_tail_before)
+    if (draft.multiline) {
+      return { error: 'pane_draft_present', detail: { draft: draft.text } } as TmuxPokeResult
+    }
+    const savedDraft = draft.text
+    if (savedDraft) await runStage('clear_draft', () => clearComposer(args.pane_id))
     await runStage('load_buffer', () => loadBuffer(bufName, args.content))
     await runStage('paste_buffer', () => pasteBuffer(bufName, args.pane_id))
     await delay(PASTE_SETTLE_MS)
     await runStage('send_keys', () => sendEnter(args.pane_id))
     await delay(PASTE_SETTLE_MS)
+    if (savedDraft) {
+      const restore = `restore-${bufName}`
+      await runStage('restore_draft', async () => {
+        await loadBuffer(restore, savedDraft)
+        await pasteBuffer(restore, args.pane_id)
+      })
+      await delay(PASTE_SETTLE_MS)
+    }
     const pane_tail_after = await runStage('capture_after', () => capturePaneTail(args.pane_id, TAIL_LINES))
-    return { ok: true, pane_tail_before, pane_tail_after }
+    const draftRestored = savedDraft ? pane_tail_after.includes(savedDraft) : true
+    return { ok: true, pane_tail_before, pane_tail_after,
+      ...(savedDraft ? { draft_saved: savedDraft, draft_restored: draftRestored } : {}) }
   } catch (e) {
     return classifyTmuxError(e as StageError)
   }

@@ -1,8 +1,11 @@
 # Claude native protocol interoperability experiment
 
-Status: experimental investigation, not a supported or enabled xats transport.
-Target initially inspected: Claude Code 2.1.295 on Linux. No production imports,
-installer changes, native roster modifications, or delivery-default changes.
+Status: historical isolated protocol investigation. These standalone probes are
+not a production transport. The separate default-native adapter candidate and
+its support boundaries are described in
+[Native Claude peer interoperability](../../docs/native-peer-interoperability.md).
+Target initially inspected: Claude Code 2.1.295 on Linux. Production code does not
+import this directory or fabricate entries in Claude's native session registry.
 
 ## Objective
 
@@ -66,7 +69,12 @@ backend routing acceptance is a separate cloud gate, not inferred from that
 initial socket/spool result.
 
 The probes require `XATS_NATIVE_CLAUDE` to select the pinned executable, or use
-`XATS_CI_HOST_TOOLS` with the CI acceptance driver. They create fresh private
+`XATS_CI_HOST_TOOLS` with the CI acceptance driver. The full driver also requires
+the separately pinned 2.1.330 executable, provisioned in that tools directory or
+selected with `XATS_NATIVE_CLAUDE_CURRENT`. Its production-adapter gate exercises
+accept, refuse, and held-release profiles on both hosts, without native opt-in
+flags. These are required checks, not a statement that a pending run passed.
+The probes create fresh private
 profiles and delete only their owned processes/files, retaining sanitized reports.
 `XATS_NATIVE_RESULTS` selects report storage. `XATS_NATIVE_DAEMON_ENTRY` enables
 only a newly spawned, private test backend, not attachment to a configured bus.
@@ -87,4 +95,5 @@ Even successful Linux no-key compatibility is not authenticated cross-platform
 support. Windows has different native authentication requirements. Named native
 peer discovery, host rendering, busy/idle behavior, duplicate handling, reconnect,
 restart durability and actual xats mailbox routing need separate evidence. This
-experiment does not change draft local-first PR #10 or installer PR #12.
+standalone experiment does not establish production support. Later integrated
+adapter acceptance is separate from these original protocol observations.

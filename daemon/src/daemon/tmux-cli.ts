@@ -52,6 +52,11 @@ export async function sendEnter(paneId: string): Promise<void> {
   await pExecFile('tmux', ['send-keys', '-t', paneId, 'Enter'])
 }
 
+/** Clear the composer line without submitting it. */
+export async function clearComposer(paneId: string): Promise<void> {
+  await pExecFile('tmux', ['send-keys', '-t', paneId, 'C-u'])
+}
+
 export function _resetTmuxAvailableCache(): void {
   _isTmuxAvailable = null
 }

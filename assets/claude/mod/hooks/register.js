@@ -19,9 +19,288 @@
  * poll timer, which is a background job.
  */
 
-// Stamped into /xats-status: if this string is not what you just deployed, the
-// host is running an older copy of the mod and nothing else you see matters.
-const MOD_BUILD = "2026-10-25-local-delivery-v6";
+// Native helpers stay in this hooks module because older supported hosts do
+// not follow the mods API ($) across an imported function boundary.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const STAGES = ["transport-written", "host-queued", "inbox-consumed", "held", "refused", "expired", "failed", "unknown"];
+const NATIVE_OBSERVATIONS = ["host-queued", "held", "refused", "expired", "failed"];
+let bridge = null;
+let error = "";
+
+function cleanLine(value) {
+  return String(value ?? "").replace(/[\r\n\x00-\x1f\x7f]/g, " ").slice(0, 180);
+}
+
+function peerLabel(peer) {
+  return `xats:${cleanLine(peer.name)}${peer.ref ? ` [${cleanLine(peer.ref)}]` : ""}`;
+}
+
+function nativeAddress(peer, state) {
+  return `uds:${state.socketDir}/xats-${state.ownerPid}-${peer.agent_id.replace(/-/g, "").toLowerCase().slice(0, 12)}.sock`;
+}
+
+function validPeer(peer, state) {
+  return peer && UUID.test(peer.agent_id) && typeof peer.name === "string" &&
+    typeof peer.address === "string" && Boolean(state.socketDir && state.ownerPid) &&
+    peer.address === nativeAddress(peer, state) &&
+    !peer.address.includes("..") &&
+    !/[\x00-\x1f]/.test(peer.address);
+}
+
+function receive(state, value) {
+  if (!value || typeof value !== "object") return;
+  if (value.kind === "peers") {
+    state.rawPeers = Array.isArray(value.peers) ? value.peers.slice(0, 128) : [];
+    if (state.pid) state.peers = state.rawPeers.filter(peer => validPeer(peer, state));
+  } else if (value.kind === "receipt") {
+    const request = state.requests.get(value.attempt_id);
+    if (!request || request.generation !== value.generation || request.event_id !== value.event_id ||
+        !STAGES.includes(value.stage)) return;
+    const prior = state.latest.get(value.attempt_id)?.stage;
+    if (["refused", "expired", "failed"].includes(prior) && prior !== value.stage) return;
+    if (prior === "host-queued" && ["transport-written", "unknown", "held"].includes(value.stage)) return;
+    state.receipts.push(value);
+    state.latest.set(value.attempt_id, value);
+    if (["host-queued", "refused", "expired", "failed", "inbox-consumed"].includes(value.stage)) delete request.text;
+  } else if (value.kind === "diagnostic") {
+    error = cleanLine(value.reason || "native peer diagnostic");
+  }
+}
+
+async function runBridge($, state, request) {
+  let buffered = "";
+  try {
+    for await (const chunk of $.process.spawn(request)) {
+      if (chunk.stream !== "stdout") continue;
+      buffered += chunk.text;
+      if (buffered.length > 1024 * 1024) throw new Error("native status overflow");
+      let end;
+      while ((end = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, end);
+        buffered = buffered.slice(end + 1);
+        let value;
+        try { value = JSON.parse(line); } catch { continue; }
+        if (value.kind === "ready") {
+          if (value.state_dir !== state.root || !Number.isSafeInteger(value.pid) || value.pid <= 1) {
+            throw new Error("invalid native helper identity");
+          }
+          const parent = state.ownerSocket.slice(0, state.ownerSocket.lastIndexOf("/"));
+          const ownerPid = state.ownerSocket.slice(state.ownerSocket.lastIndexOf("/") + 1, -5);
+          // The helper PID is deliberately not part of the address: a helper
+          // restart must not invalidate an address a peer already listed, and
+          // the native host only runs a safety check on real uds paths.
+          if (value.socket_dir !== parent || String(value.owner_pid) !== ownerPid) {
+            throw new Error("invalid native socket namespace");
+          }
+          state.pid = value.pid;
+          state.socketDir = parent;
+          state.ownerPid = ownerPid;
+          if (state.closed) {
+            await $.fs.write(`${state.root}/stop-${state.pid}`, "stop\n");
+            continue;
+          }
+          state.ready = true;
+          state.everReady = true;
+          state.peers = state.rawPeers.filter(peer => validPeer(peer, state));
+          state.resolve(true);
+          error = "";
+        } else if (value.kind === "unavailable") {
+          error = `native helper unavailable (${cleanLine(value.reason)})`;
+        } else {
+          receive(state, value);
+          if (value.kind === "receipt") scheduleNativeReceiptFlush($);
+        }
+      }
+    }
+  } catch {
+    error = "native helper stopped or could not start";
+  } finally {
+    state.ready = false;
+    state.resolve(false);
+  }
+}
+
+export async function stopNativeBridge($) {
+  const state = bridge;
+  if (!state) return;
+  state.closed = true;
+  state.ready = false;
+  if (state.pid) {
+    try { await $.fs.write(`${state.root}/stop-${state.pid}`, "stop\n"); } catch { /* unload closes its stream too */ }
+  }
+  bridge = null;
+}
+
+export async function connectNativeBridge($, { cursorPath, agentId, base, rearm = false }) {
+  const wasSelected = Boolean(bridge?.everReady);
+  if (bridge?.agentId === agentId && bridge.cursorPath === cursorPath && (bridge.ready || !rearm)) {
+    return bridge.ready || bridge.everReady;
+  }
+  if (String(await $.env.get("XATS_NATIVE_PEERS")) === "0") return false;
+  const socket = String((await $.env.get("CLAUDE_CODE_MESSAGING_SOCKET")) || "");
+  if (!/^\/[^\x00\r\n]*\/[1-9][0-9]*\.sock$/.test(socket)) return false;
+  const home = (await $.env.get("HOME")) || "";
+  const session = cursorPath.match(/\/([A-Za-z0-9_-]{1,128})\.cursor\.json$/)?.[1];
+  if (!home.startsWith("/") || !session || !UUID.test(agentId)) return false;
+  // Capability selection precedes native I/O. Old daemons keep the connected
+  // transport; a previously selected native owner never switches transports.
+  try {
+    if (!localLease) return wasSelected;
+    await validateLocalLease($, localLease);
+    if (localLease.receiptObservations !== 1) {
+      error = "native receipt observations unsupported; connected delivery";
+      return wasSelected;
+    }
+  } catch { error = "native receipt capability unavailable"; return wasSelected; }
+  if (bridge) await stopNativeBridge($);
+  const state = { agentId, cursorPath, root: `${home}/.xats/native/${session}`, ownerSocket: socket, socketDir: "", ownerPid: null, pid: null,
+    ready: false, everReady: wasSelected, closed: false, peers: [], rawPeers: [],
+    requests: new Map(), latest: new Map(), receipts: [], resolve: () => {} };
+  bridge = state;
+  const ready = new Promise(resolve => { state.resolve = resolve; });
+  const timer = $.clock.after(4500, () => { if (!state.ready) { state.closed = true; state.resolve(false); } });
+  const token = (await $.env.get("CLAUDE_CODE_MESSAGING_TOKEN")) || "";
+  const request = {
+    argv: ["python3", "-I", "-B", `${$.plugin.root}/native/peer.py`,
+      "--state-dir", state.root, "--base", base, "--agent-id", agentId, "--socket", socket],
+    env: { CLAUDE_CODE_MESSAGING_TOKEN: String(token), PYTHONDONTWRITEBYTECODE: "1" },
+  };
+  $.clock.after(0, () => { void runBridge($, state, request); });
+  const connected = await ready;
+  timer?.cancel?.();
+  return connected || wasSelected;
+}
+
+export function nativeBridgeState() {
+  return { ready: Boolean(bridge?.ready), selected: Boolean(bridge?.everReady),
+    peers: bridge?.peers.length || 0, error };
+}
+
+export function drainNativeReceipts() {
+  if (!bridge) return [];
+  return bridge.receipts.splice(0);
+}
+
+export async function nativeSubmit($, hint, message, text) {
+  const state = bridge;
+  if (!state?.everReady) return null;
+  if (!state.ready || state.closed) throw new Error("native owner unavailable; no alternate submission");
+  if (!UUID.test(hint.attempt_id) || !UUID.test(hint.message_id)) throw new Error("invalid native hint");
+  const request = { attempt_id: hint.attempt_id, message_id: hint.message_id,
+    generation: hint.generation, event_id: hint.event_id,
+    source_agent_id: message.from_agent_id, source_name: cleanLine(message.from_name || "peer"),
+    delivery: "body", text: "" };
+  try { if (String(await $.env.get("XATS_NATIVE_DELIVERY")) === "notice") request.delivery = "notice"; }
+  catch { /* full-body native delivery is the default */ }
+  if (request.delivery === "body" && typeof message.body !== "string") throw new Error("native message body unavailable");
+  const content = request.delivery === "notice" ? text :
+    `${message.subject ? `Subject: ${cleanLine(message.subject)}\n\n` : ""}${message.body}`;
+  // Treat protocol-looking text in the body as data, not another sender header.
+  request.text = content.replace(/<\/?cross-session-message\b/gi, tag => tag.replace("<", "&lt;")) +
+    `\n<xats-native-notice attempt="${hint.attempt_id}" generation="${hint.generation}" event="${hint.event_id}"/>`;
+  state.requests.set(hint.attempt_id, request);
+  const response = `${state.root}/responses/${hint.attempt_id}.json`;
+  await $.fs.write(response, "");
+  await $.fs.write(`${state.root}/requests/${hint.attempt_id}.json`, JSON.stringify(request) + "\n");
+  let written = null;
+  for (let i = 0; i < 55; i += 1) {
+    let value = state.latest.get(hint.attempt_id);
+    if (!value) {
+      try { value = JSON.parse(String(await $.fs.read(response))); } catch { /* response not ready */ }
+    }
+    if (value?.attempt_id === hint.attempt_id && value.generation === hint.generation &&
+        value.event_id === hint.event_id && (STAGES.includes(value.stage) ||
+          (value.kind === "pre-admission" && value.stage === "busy"))) {
+      if (value.stage !== "transport-written") return value.stage;
+      written = value.stage;
+      if (i >= 10) return written;
+    }
+    if (!state.ready) throw new Error("native helper ended during submission");
+    await $.clock.sleep(100);
+  }
+  return written || "unknown";
+}
+
+function listing(state) {
+  if (!state?.ready || !state.peers.length) return "";
+  return "xats peers (native IPC, non-Claude):\n" + state.peers.map(peer =>
+    `- ${peerLabel(peer)} (${cleanLine(peer.agent_type)})\n  SendMessage to: ${peer.address}\n  Stable alias: xats:${peer.agent_id}`
+  ).join("\n");
+}
+
+export async function listNativePeers($, e, next) {
+  const original = await next(e);
+  if (original?.deny || original?.isError || typeof original?.result?.listing !== "string") return original;
+  const text = listing(bridge);
+  if (!text) return original;
+  return { ...original, result: { ...original.result,
+    listing: `${original.result.listing}\n\n${text}`,
+    sections: [...(original.result.sections || []), { kind: "xats", total: bridge.peers.length,
+      rows: bridge.peers.map(peer => ({ name: peerLabel(peer), id: peer.address,
+        type: cleanLine(peer.agent_type), status: "online" })) }],
+  } };
+}
+
+export async function listNativePeerCommand($, e, next) {
+  const original = await next(e);
+  const text = listing(bridge);
+  return text && typeof original?.text === "string"
+    ? { ...original, text: `${original.text}\n\n${text}` } : original;
+}
+
+export async function observeNativeReceive($, e, next) {
+  // The public host callback resolves with text only once its native delivery
+  // entered the queue. A refused/held/consumed delivery does not prove that.
+  const queued = await next(e);
+  const state = bridge;
+  if (!state?.everReady) return queued;
+  if (String(e.text || "").includes("<xats-native-notice")) {
+    await $.fs.write(`${state.root}/receive-observed.json`, JSON.stringify({
+      origin: e.origin?.kind, result_type: typeof queued,
+      result_keys: queued && typeof queued === "object" ? Object.keys(queued) : [],
+      has_queued_text: typeof queued?.text === "string",
+    }) + "\n");
+  }
+  if (!["peer", "peer-send-message"].includes(e.origin?.kind) || typeof queued?.text !== "string") return queued;
+  const marker = /<xats-native-notice attempt="([0-9a-f-]{36})" generation="([0-9]+)" event="([0-9]+)"\/>/gi;
+  // Only the final correlation tag belongs to this native frame. A quoted tag
+  // in a full message body must never settle a different, held message.
+  const matches = [...queued.text.matchAll(marker)];
+  for (const match of matches.slice(-1)) {
+    const request = state.requests.get(match[1]);
+    if (!request || request.generation !== Number(match[2]) || request.event_id !== Number(match[3]) || typeof request.text !== "string" ||
+        !queued.text.includes(request.text)) continue;
+    const prior = state.latest.get(request.attempt_id)?.stage;
+    if (["refused", "expired", "failed", "inbox-consumed"].includes(prior)) continue;
+    const fact = { kind: "receipt", attempt_id: request.attempt_id, generation: request.generation,
+      event_id: request.event_id, stage: "host-queued", admission_source: "session.receive" };
+    await $.fs.write(`${state.root}/admissions/${request.attempt_id}.json`, JSON.stringify(fact) + "\n");
+    receive(state, fact);
+    scheduleNativeReceiptFlush($);
+  }
+  return queued;
+}
+
+export async function routeNativeSend($, e, next) {
+  if (typeof e.to !== "string" || !e.to.startsWith("xats:")) return next(e);
+  const peers = bridge?.ready ? bridge.peers : [];
+  const matches = peers.filter(peer => e.to === `xats:${peer.agent_id}` || e.to === peerLabel(peer));
+  if (matches.length !== 1) return { isDelivered: false,
+    reason: "xats native peer is unavailable or ambiguous; refresh ListAgents and use its exact address" };
+  return next({ ...e, to: matches[0].address });
+}
+
+export const __nativeInternals = {
+  receive, listing, peerLabel,
+  setState(value) { bridge = value; error = ""; },
+  reset() { bridge = null; error = ""; },
+};
+
+// Stamped into /xats-status so an old loaded mod is distinguishable from disk.
+const MOD_BUILD = "2026-11-22-native-body-v1";
+const TERMINAL_OUTCOMES = ["held", "refused", "expired", "failed"];
+let nativeReceipts = [];
+let nativeFlushPromise = null;
 
 let lastSessionID = "";
 let lastAgentsSeen = "none";
@@ -70,6 +349,7 @@ let localOwned = false;
 let localUnsupported = false;
 let localLease = null;
 let localBusy = false;
+let localWaiting = false;
 let localConnected = false;
 let localCanFallback = true;
 // Bounded re-arm/retry accounting: after a daemon restart the owner keeps
@@ -264,19 +544,19 @@ async function loadAcceptedCursor($) {
       acceptedEventId = saved.event_id;
       lastEventId = Math.max(lastEventId, acceptedEventId);
       if (saved.local_delivery && typeof saved.local_delivery.attempt_id === "string" &&
-          ["host-queued", "transport-written", "inbox-consumed", "held", "refused", "failed", "unknown"].includes(saved.local_delivery.stage)) {
+          ["host-queued", "transport-written", "inbox-consumed", "held", "refused", "expired", "failed", "unknown"].includes(saved.local_delivery.stage)) {
         localAttempt = saved.local_delivery;
       }
       for (const attempt of Object.values(saved.local_outcomes ?? {})) {
         if (Number.isSafeInteger(attempt?.event_id) && attempt.event_id > 0 &&
-            ["held", "refused", "unknown"].includes(attempt.stage)) {
+            [...TERMINAL_OUTCOMES, "unknown"].includes(attempt.stage)) {
           localOutcomes[attempt.event_id] = attempt;
         }
       }
       // Migrate the original single-attempt journal without changing version 1.
       if (Number.isSafeInteger(localAttempt?.event_id) && localAttempt.event_id > 0 &&
           localAttempt.retryable !== true &&
-          ["held", "refused", "unknown"].includes(localAttempt.stage)) {
+          [...TERMINAL_OUTCOMES, "unknown"].includes(localAttempt.stage)) {
         localOutcomes[localAttempt.event_id] = localAttempt;
       }
       if (localAttempt || Object.keys(localOutcomes).length) localCanFallback = false;
@@ -328,7 +608,7 @@ async function readMailboxCursor($, base) {
       // A refusal or hold is the host's decision, not an uncertainty: advancing
       // the cursor must not erase it, or a later generation would rewrite it.
       const stage = localOutcomes[id]?.stage;
-      if (stage === "refused" || stage === "held") continue;
+      if (TERMINAL_OUTCOMES.includes(stage)) continue;
       if (Number(id) <= cursor) { delete localOutcomes[id]; pruned = true; }
     }
     // Only uncertainty may be resolved by a real read. A refusal or an explicit
@@ -384,7 +664,7 @@ async function deliver($) {
     // an option here — peer mail must never look like the person typed it.
     const result = await $.prompt.submit({ text: payloadText(batch) });
     const stage = classifySubmitResult(result);
-    if (stage === "refused" || stage === "held") {
+    if (TERMINAL_OUTCOMES.includes(stage)) {
       // An explicit host refusal or hold is a decision: the polling path must
       // never resubmit it.
       lastSubmitError = typeof result?.drop === "string"
@@ -587,6 +867,7 @@ async function connectLocal($) {
     // renewed this generation. Never extend it locally without server proof.
     if (expiry <= Date.now()) await validateLocalLease($, lease);
     localLease = lease;
+    await connectNativeBridge($, { cursorPath: file, agentId, base: await baseUrl($) });
     startLocalOwner($);
     localError = "";
     return true;
@@ -616,6 +897,7 @@ async function validateLocalLease($, lease) {
     throw error;
   }
   lease.expiresAt = data.expiresAt;
+  lease.receiptObservations = data.receipt_observations === 1 ? 1 : 0;
 }
 
 async function refreshLocalLease($) {
@@ -640,6 +922,7 @@ async function renewLocal($) {
   try {
     if (localLease) await validateLocalLease($, localLease);
     else await refreshLocalLease($);
+    await connectNativeBridge($, { cursorPath, agentId, base: await baseUrl($), rearm: true });
     localError = "";
   } catch (error) {
     await tickLog($, `error ${error?.code || error?.name || "err"} status=${error?.status ?? "-"}`)
@@ -653,7 +936,7 @@ async function renewLocal($) {
 async function saveLocalAttempt($, hint, stage, accepted = false, { blocking = true, retryable = false } = {}) {
   localAttempt = { attempt_id: hint.attempt_id, generation: hint.generation, event_id: hint.event_id, stage,
     ...(retryable ? { retryable: true } : {}) };
-  if (blocking && ["held", "refused", "unknown"].includes(stage)) localOutcomes[hint.event_id] = localAttempt;
+  if (blocking && [...TERMINAL_OUTCOMES, "unknown"].includes(stage)) localOutcomes[hint.event_id] = localAttempt;
   else delete localOutcomes[hint.event_id];
   if (accepted) {
     acceptedEventId = Math.max(acceptedEventId, hint.event_id);
@@ -681,7 +964,7 @@ async function processLocalHint($, hint) {
   const priorStage = localOutcomes[hint.event_id]?.stage;
   // A host refusal or hold is a decision, not an uncertainty: neither a real read
   // nor a replacement generation may rewrite it as consumption.
-  if (priorStage === "refused" || priorStage === "held") {
+  if (TERMINAL_OUTCOMES.includes(priorStage)) {
     await saveLocalAttempt($, hint, priorStage);
     return priorStage;
   }
@@ -721,7 +1004,9 @@ async function processLocalHint($, hint) {
   submitAttempts += 1;
   let stage;
   try {
-    stage = classifySubmitResult(await $.prompt.submit({ text: payloadText(batch) }));
+    const nativeStage = await nativeSubmit($, hint, batch[0], payloadText(batch));
+    stage = nativeStage === null
+      ? classifySubmitResult(await $.prompt.submit({ text: payloadText(batch) })) : nativeStage;
   } catch (error) {
     // A thrown submit is uncertainty, never a refusal.
     stage = "unknown";
@@ -744,7 +1029,7 @@ async function processLocalHint($, hint) {
   }
   pending = [];
   if (stage === "host-queued" || stage === "transport-written") submitOk += 1;
-  lastSubmitError = ["refused", "held", "unknown"].includes(stage) ? `local delivery ${stage}; no automatic resubmit` : "";
+  lastSubmitError = [...TERMINAL_OUTCOMES, "unknown"].includes(stage) ? `local delivery ${stage}; no automatic resubmit` : "";
   try {
     await saveLocalAttempt($, hint, stage, stage === "host-queued" || stage === "transport-written");
   } catch {
@@ -770,6 +1055,97 @@ async function tickLog($, line) {
   } catch { /* diagnostics must never break delivery */ }
 }
 
+function scheduleNativeReceiptFlush($) {
+  if (!localOwned || (localBusy && !localWaiting)) return;
+  $.clock.after(0, () => {
+    if (localOwned && (!localBusy || localWaiting)) {
+      void flushNativeReceipts($).catch(() => { localError = "native receipt pending acknowledgement; no fallback"; });
+    }
+  });
+}
+
+async function flushNativeReceipts($) {
+  if (nativeFlushPromise) return nativeFlushPromise;
+  const work = performNativeReceiptFlush($);
+  nativeFlushPromise = work;
+  try { await work; } finally { if (nativeFlushPromise === work) nativeFlushPromise = null; }
+}
+
+async function performNativeReceiptFlush($) {
+  const epoch = localEpoch;
+  for (const fact of drainNativeReceipts()) {
+    const index = nativeReceipts.findIndex(old => old.attempt_id === fact.attempt_id && old.generation === fact.generation);
+    if (index < 0) nativeReceipts.push(fact);
+    else if (!["refused", "expired", "failed", "inbox-consumed"].includes(nativeReceipts[index].stage)) {
+      // A newer queue-admission receipt can resolve an earlier unknown/held
+      // observation whose ACK was rejected. Do not let that older ACK starve it.
+      if (nativeReceipts[index].stage !== "host-queued" || fact.stage === "inbox-consumed") nativeReceipts[index] = fact;
+    }
+  }
+  while (nativeReceipts.length) {
+    const fact = nativeReceipts[0];
+    if (epoch !== localEpoch) return;
+    const observation = NATIVE_OBSERVATIONS.includes(fact.stage);
+    if (observation) {
+      const prior = localOutcomes[fact.event_id]?.stage;
+      if (["refused", "expired", "failed"].includes(prior) && prior !== fact.stage) {
+        nativeReceipts.shift();
+        continue;
+      }
+      // Save terminal policy by event BEFORE considering a replacement lease.
+      // A delayed old-generation refusal must survive a covering MCP read.
+      if (fact.stage === "host-queued") {
+        delete localOutcomes[fact.event_id];
+        acceptedEventId = Math.max(acceptedEventId, fact.event_id);
+        lastEventId = Math.max(lastEventId, acceptedEventId);
+      } else localOutcomes[fact.event_id] = { attempt_id: fact.attempt_id,
+        generation: fact.generation, event_id: fact.event_id, stage: fact.stage };
+      await writeCursor($);
+      if (epoch !== localEpoch) return;
+    }
+    if (!localLease) throw new Error("native receipt awaiting a live observer lease");
+    if (!observation && fact.generation !== localLease.generation) {
+      nativeReceipts.shift();
+      continue;
+    }
+    const lease = { ...localLease };
+    const current = fact.attempt_id === localAttempt?.attempt_id && fact.event_id === localAttempt?.event_id;
+    if (!observation && current && (["refused", "expired", "failed"].includes(localAttempt.stage) ||
+        (localAttempt.stage === "host-queued" && !["host-queued", "inbox-consumed"].includes(fact.stage)))) {
+      nativeReceipts.shift();
+      continue;
+    }
+    // A late receipt still belongs to its original attempt. It must not replace
+    // a newer cursor journal, or be stamped with replacement credentials.
+    if (!observation && current && localAttempt.stage !== "inbox-consumed") {
+      await saveLocalAttempt($, fact, fact.stage, fact.stage === "transport-written");
+    }
+    try {
+      await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: fact.stage,
+        ...(observation ? { observed_generation: fact.generation } : {}) }, lease);
+    } catch (error) {
+      if (!observation && [404, 409, 410].includes(error?.status)) { nativeReceipts.shift(); continue; }
+      throw error;
+    }
+    if (epoch !== localEpoch) return;
+    const sameEvent = fact.event_id === localAttempt?.event_id;
+    if (observation && sameEvent) await saveLocalAttempt($, fact, fact.stage, fact.stage === "host-queued");
+    if (sameEvent && fact.stage === "host-queued") {
+      const base = await baseUrl($);
+      if (epoch !== localEpoch) return;
+      const cursor = await readMailboxCursor($, base);
+      if (epoch !== localEpoch) return;
+      if (cursor !== null && cursor >= fact.event_id) {
+        await saveLocalAttempt($, fact, "inbox-consumed");
+        // The daemon already reconciles its own durable cursor atomically with
+        // an observed host receipt. Do not ACK an old ID using a newer epoch.
+        if (!observation) await localRequest($, "ack", { attempt_id: fact.attempt_id, stage: "inbox-consumed" }, lease);
+      }
+    }
+    nativeReceipts.shift();
+  }
+}
+
 async function localTick($) {
   await tickLog($, `tick busy=${localBusy} owned=${localOwned} lease=${localLease ? "yes" : "no"}`)
   if (!localOwned || localBusy) return;
@@ -778,13 +1154,17 @@ async function localTick($) {
   let delay = 250;
   try {
     if (!localLease) await refreshLocalLease($);
+    await flushNativeReceipts($);
     // Throttled, idempotent rebind attempt: after a restart this re-attaches the
     // identity before the model needs get_inbox, so recovery needs no turn and
     // no manual /mcp. Steady state answers 409 binding_not_lost immediately.
     if (!localAck) {
       let data;
       try {
-        data = await localRequest($, "wait?timeout_ms=20000");
+        localWaiting = true;
+        try { data = await localRequest($, "wait?timeout_ms=20000"); }
+        finally { localWaiting = false; }
+        await flushNativeReceipts($);
       } catch (error) {
         // Only explicit unsupported capability BEFORE a successful wait can
         // choose polling. Auth errors and uncertain waits retain ownership.
@@ -866,6 +1246,9 @@ async function localTick($) {
       delay = Math.min(5000, 500 * Math.max(1, localReconnects));
     }
   } finally {
+    if (epoch === localEpoch) {
+      try { await flushNativeReceipts($); } catch { localError = "native receipt pending acknowledgement; no fallback"; }
+    }
     localBusy = false;
     await tickLog($, `reschedule delay=${delay}`)
     if (localOwned && epoch === localEpoch) {
@@ -909,6 +1292,9 @@ export function register(on, options) {
         void poll($);
       });
     }
+    // Native peers must be ready before Claude's first discovery/tool call.
+    // A missing native capability still leaves connected delivery available.
+    if (await $.env.get("CLAUDE_CODE_MESSAGING_SOCKET")) await poll($);
     // Register separately and in this order: a rejection of one command (a name
     // that collides, a host that forbids it) must not silently cost us the
     // diagnostic command, which is the only way to see what went wrong.
@@ -927,6 +1313,18 @@ export function register(on, options) {
       }
     }
     return next(e);
+  });
+
+  on("session.end", async ($, e, next) => {
+    await stopNativeBridge($);
+    return next(e);
+  });
+  on("tool.call", { tool: "ListAgents" }, listNativePeers).catch(($, e, next) => next(e));
+  on("command.run", { command: ["list-agents", "peers"] }, listNativePeerCommand).catch(($, e, next) => next(e));
+  on("session.receive", observeNativeReceive).catch(($, e, next) => next(e));
+  on("session.send", routeNativeSend).catch(($, e, next) => {
+    if (!String(e.to || "").startsWith("xats:")) return next(e);
+    return { isDelivered: false, reason: "xats native send outcome is unknown; do not resend or switch transports" };
   });
 
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
@@ -1073,6 +1471,7 @@ export function register(on, options) {
       `  pending:  ${pending.length}`,
       `  polls:    ${polls}`,
       `  local delivery: ${localOwned ? (localConnected ? "connected" : "reconnecting") : "polling"}${localError ? ` · ${localError}` : ""}`,
+      `  native peers: ${nativeBridgeState().ready ? "connected" : nativeBridgeState().selected ? "unavailable, no fallback" : "compatibility"} · ${nativeBridgeState().peers} peer(s)${nativeBridgeState().error ? ` · ${nativeBridgeState().error}` : ""}`,
       `  submit:   ${submitOk}/${submitAttempts} ok, ${submitFailures} consecutive failures`,
       `  retry:    ${nextSubmitAt ? `${Math.max(0, nextSubmitAt - Date.now())}ms` : "none"}`,
       `  submit error: ${lastSubmitError || "none"}`,
@@ -1090,6 +1489,8 @@ export function register(on, options) {
 export const __internals = {
   poll,
   classifySubmitResult,
+  processLocalHint,
+  flushNativeReceipts,
   localTick,
   renewLocal,
   deliver,
@@ -1122,6 +1523,10 @@ export const __internals = {
     team = value;
   },
   reset() {
+    __nativeInternals.reset();
+    nativeReceipts = [];
+    nativeFlushPromise = null;
+    localWaiting = false;
     localEpoch += 1;
     localOwned = false;
     localUnsupported = false;

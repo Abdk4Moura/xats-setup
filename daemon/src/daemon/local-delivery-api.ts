@@ -6,7 +6,8 @@ import { localArrivalHub } from './local-arrival.js'
 
 const ackSchema = z.object({
   attempt_id: z.string().min(1).max(128),
-  stage: z.enum(['host-queued', 'transport-written', 'inbox-consumed', 'held', 'refused', 'unknown', 'failed']),
+  stage: z.enum(['host-queued', 'transport-written', 'inbox-consumed', 'held', 'refused', 'expired', 'unknown', 'failed']),
+  observed_generation: z.number().int().positive().optional(),
 }).strict()
 const waitSchema = z.object({
   timeout_ms: z.coerce.number().int().min(0).max(20000).optional(),
@@ -37,7 +38,7 @@ export function mountLocalDeliveryApi(app: FastifyInstance, db: Database.Databas
     if (!auth) return
     const lease = store.renew(auth.token)
     if (!lease) return reply.code(401).send({ error: 'invalid_delivery_lease' })
-    return reply.send({ generation: lease.generation, expiresAt: lease.expiresAt })
+    return reply.send({ generation: lease.generation, expiresAt: lease.expiresAt, receipt_observations: 1 })
   })
 
   app.post('/api/local-delivery/ack', async (req, reply) => {
@@ -45,7 +46,10 @@ export function mountLocalDeliveryApi(app: FastifyInstance, db: Database.Databas
     if (!auth) return
     const parsed = ackSchema.safeParse(req.body)
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_delivery_ack' })
-    const accepted = store.acknowledge(auth.token, { attemptId: parsed.data.attempt_id, stage: parsed.data.stage })
+    const accepted = parsed.data.observed_generation === undefined
+      ? store.acknowledge(auth.token, { attemptId: parsed.data.attempt_id, stage: parsed.data.stage })
+      : store.observe(auth.token, { attemptId: parsed.data.attempt_id,
+        generation: parsed.data.observed_generation, stage: parsed.data.stage })
     if (!accepted) return reply.code(409).send({ error: 'stale_delivery_attempt' })
     hub.publish()
     return reply.send({ ok: true })

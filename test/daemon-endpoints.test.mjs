@@ -156,3 +156,27 @@ test('every REST endpoint the adapters rely on exists and answers', { timeout: 9
     assert.ok(status >= 200 && status < 300, `${name} returned ${status}`)
   }
 })
+
+test('a Pi session keeps one durable identity across a reload, and only its own key can off-line it', { timeout: 30000 }, async (t) => {
+  const result = await withDaemon(async (base) => {
+    const reg = (session_key) => post(base, '/api/register', { name: 'pi-box-cf49e51e', team: 'default',
+      role: 'worker', agent_type: 'custom', agent_type_name: 'pi', session_key, name_mode: 'prefer' })
+    const first = await (await reg('pi-session-1')).json()
+    const health = (await post(base, '/api/deregister', { agent_id: first.agent_id,
+      session_key: 'not-my-session', retain_mailbox: true })).status
+    const stillListed = (await (await get(base, '/api/agents?team=default')).json()).agents
+      .find(a => a.agent_id === first.agent_id)
+    const retained = (await post(base, '/api/deregister', { agent_id: first.agent_id,
+      session_key: 'pi-session-1', retain_mailbox: true })).status
+    const resumed = await (await reg('pi-session-1')).json()
+    const replacement = await (await reg('pi-session-2')).json()
+    return { health, stillListed: Boolean(stillListed), retained, first: first.agent_id,
+      resumed: resumed.agent_id, replacement: replacement.agent_id }
+  })
+  if (result?.skipped) return t.skip(result.skipped)
+  assert.equal(result.health, 404, 'a different session key must not off-line this agent')
+  assert.equal(result.stillListed, true, 'the rejected off-line must leave the identity in place')
+  assert.equal(result.retained, 200)
+  assert.equal(result.resumed, result.first, 'reload must reuse the durable agent_id')
+  assert.notEqual(result.replacement, result.first, 'a different live session must not take over the identity')
+})
