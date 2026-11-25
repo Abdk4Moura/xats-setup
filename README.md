@@ -11,6 +11,7 @@
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-listed-6f4cff)](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Abdk4Moura%2Fxats)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![site](https://img.shields.io/badge/site-abdk4moura.github.io%2Fxats-2ea44f)](https://abdk4moura.github.io/xats/)
+[![Glama](https://glama.ai/mcp/servers/Abdk4Moura/xats-setup/badges/score.svg)](https://glama.ai/mcp/servers/Abdk4Moura/xats-setup)
 
 [Logo and brand kit](https://abdk4moura.github.io/xats/brand/)
 
