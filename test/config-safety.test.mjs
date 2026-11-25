@@ -55,7 +55,12 @@ test('strict config reader falls back only on ENOENT and never logs content', t 
   assert.equal(readConfigJson(file, fallback), fallback);
   for (const raw of ['{SECRET-invalid', 'null', '[]', 'true', '42', '"text"']) {
     fs.writeFileSync(file, raw);
-    assert.throws(() => readConfigJson(file, fallback), error => error.message.includes(file) && !error.message.includes(raw));
+    // Compare only the detail, not the path: a random temp-dir suffix can
+    // contain the same digits as a short raw value like 42.
+    assert.throws(() => readConfigJson(file, fallback), error => {
+      const detail = error.message.split(file).join('');
+      return error.message.includes(file) && !detail.includes(raw);
+    });
     assert.deepEqual(readJson(file, fallback), raw === '{SECRET-invalid' ? fallback : JSON.parse(raw));
   }
   assert.throws(() => readConfigJson(home, fallback), /cannot read file/);
